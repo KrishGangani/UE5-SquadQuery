@@ -92,3 +92,7 @@ P07_SquadQuery\
 ├── Tools\           ← build, package, smoke; analysis and run scripts
 └── SquadQuery\      ← the Unreal Engine project
 ```
+
+## License
+
+MIT, see [LICENSE](LICENSE). Unreal Engine itself is not included and is covered by Epic Games' own license.
