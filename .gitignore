@@ -26,3 +26,6 @@ Build/
 Benchmarks/Raw/*
 !Benchmarks/Raw/*_manifest.json
 Benchmarks/*_console.txt
+
+# Local drafts (code and doc fragments parked between steps). Never commit.
+_wip/

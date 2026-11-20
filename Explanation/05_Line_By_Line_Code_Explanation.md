@@ -5,7 +5,8 @@
 | Part | Step | Files |
 |---|---|---|
 | A | Phase 4, F1–F3 (foundation) | `.uproject`, two `Target.cs`, two `Build.cs`, two module `.cpp`, `.uplugin`, three config `.ini`, `Tools\*.bat` |
-| B | S1 onwards | written with the code |
+| B | S1 (arena and navigation) | `SQCoverBlock.h/.cpp`, `SQArenaSubsystem.h/.cpp`, the changed `SquadQuery.Build.cs` |
+| C | S2 onwards | written with the code |
 
 Engine references are relative to `C:\Program Files\Epic Games\UE_5.8\Engine\`, version 5.8.4.
 
@@ -235,3 +236,238 @@ All three are thin wrappers, so every build and run uses exactly the same comman
 - No `Content\` assets and no map: the arena is spawned by code (S1).
 - No C++ classes: Phase 4 is the skeleton only (Prompt 7, Phase 4 "folder structure, classes, and modules"; the classes are designed in `02` §4 and written step by step from S1).
 - No benchmark scripts (`csv_stats.py`, `run_bench.py`): they are copied and adapted from UE5-UpdateBudget in S2, when there is something to measure.
+
+---
+
+## Part B · S1: the arena, its Smart Object slots and its runtime navmesh
+
+S1 builds the test arena of `01` §6.1 and proves, in a **cooked** build, the two assumptions everything else rests on: that a navmesh can be generated for geometry spawned at runtime, and that Smart Objects can be created at runtime without assets (`01b` #9, #11). Two classes, both in the game module, because the arena is benchmark content, not part of the reusable system (`02` §3).
+
+### B1. `SquadQuery.Build.cs` (changed in S1)
+
+| Line | What changed, and why |
+|---|---|
+| `PublicDependencyModuleNames … "SmartObjectsModule"` | **Public** now, because two *public* headers need it: `SQCoverBlock.h` derives a class from `USmartObjectBehaviorDefinition`, and `SQArenaSubsystem.h` stores `FSmartObjectSlotHandle`. Any module that includes those headers needs the Smart Object include paths, which is exactly what "public" passes on (`06` §2). The `.uproject` already lists the SmartObjects plugin, so UBT doesn't warn (`05` A1) |
+| `PrivateDependencyModuleNames … "NavigationSystem"` | Only `SQArenaSubsystem.cpp` uses navigation (`UNavigationSystemV1`, `ANavMeshBoundsVolume`, `UNavigationPath`). Private keeps those include paths away from other modules. NavigationSystem is an engine module, not a plugin, so nothing has to be declared in the `.uproject` |
+| `PrivateDependencyModuleNames … "GameplayTags"` | *Added after the second S1 build failed to link* (`09` S1-b). The Smart Object request filter and slot definition contain gameplay tag containers and queries, and `SQArenaSubsystem.cpp` instantiates their constructors and copies, so this module links against `GameplayTags` itself. `SmartObjectsModule` lists `GameplayTags` as a public dependency, yet the link still failed until it was added here **[observed]**: depend directly on every module whose types your own code constructs or copies (`07` S1) |
+| `SquadQueryCore` stays private | No public header of the game module includes a core header yet. That changes in S3 |
+
+`AIModule` is still not added: S1 uses no EQS and no AI controller.
+
+### B2. `Public\SQCoverBlock.h`
+
+```cpp
+UCLASS(HideDropdown, NotBlueprintType)
+class USQCoverBehaviorDefinition : public USmartObjectBehaviorDefinition { GENERATED_BODY() };
+
+UCLASS()
+class ASQCoverBlock : public AActor
+{
+	GENERATED_BODY()
+public:
+	ASQCoverBlock();
+	void SetCoverDefinition(USmartObjectDefinition* Definition);
+	USmartObjectComponent* GetSmartObjectComponent() const { return SmartObject; }
+	static constexpr float LengthCm = 300.f;     // and ThicknessCm = 100.f, HeightCm = 130.f
+private:
+	UPROPERTY(VisibleAnywhere, Category = "Cover") TObjectPtr<USceneComponent> Root;
+	UPROPERTY(VisibleAnywhere, Category = "Cover") TObjectPtr<UStaticMeshComponent> Mesh;
+	UPROPERTY(VisibleAnywhere, Category = "Cover") TObjectPtr<USmartObjectComponent> SmartObject;
+};
+```
+
+| Line | What it does, and why |
+|---|---|
+| `#include "GameFramework/Actor.h"`, `"SmartObjectDefinition.h"` | The two base classes. `SmartObjectDefinition.h` declares `USmartObjectBehaviorDefinition` (`SO/Public/SmartObjectDefinition.h:65-69`); a base class must be complete, so a forward declaration isn't enough |
+| `#include "SQCoverBlock.generated.h"` | The code UnrealHeaderTool (UHT) writes for the two `UCLASS`es. It must be the **last** include of a reflected header (`06` §6) |
+| `class USmartObjectComponent; class UStaticMeshComponent;` | Forward declarations: the header only stores pointers to them, so their full definitions are needed only in the `.cpp`. Every file that includes this header compiles faster |
+| `UCLASS(HideDropdown, NotBlueprintType)` | `HideDropdown` keeps the class out of editor class pickers; `NotBlueprintType` keeps it out of Blueprint variable types. It is an implementation detail of the arena. The same specifiers as Epic's test behavior (`SmartObjectsTestSuite/Public/SmartObjectTestTypes.h`) |
+| `class USQCoverBehaviorDefinition : public USmartObjectBehaviorDefinition` | **Why it exists:** a Smart Object definition only passes validation if every slot carries a behavior definition (or the definition has a default one), and an invalid definition stops every component from registering (`01b` #19). It carries no data; its type says "this slot is cover" |
+| `GENERATED_BODY()` | UHT's per-class boilerplate: reflection data, `StaticClass()`, the constructors the object system needs (`06` §6) |
+| `UCLASS() class ASQCoverBlock : public AActor` | One cover block. An actor, because it has a place in the world, collision and components. No `_API` export macro: nothing outside this module uses it, the same convention as UE5-UpdateBudget's game module |
+| `ASQCoverBlock();` | The constructor builds the components. Unreal runs it once for the **class default object** (CDO), and every spawned instance is initialised from it |
+| `void SetCoverDefinition(USmartObjectDefinition*)` | Must be called between `SpawnActorDeferred` and `FinishSpawning`: in game worlds the Smart Object component registers in `BeginPlay`, and once registered it refuses a new definition (`SO/Private/SmartObjectComponent.cpp:296-300, 359-372`) |
+| `GetSmartObjectComponent() const` | The arena needs the component's registered handle to look up its slots. `const`: it doesn't change the block |
+| `static constexpr float LengthCm = 300.f;` (and `ThicknessCm`, `HeightCm`) | The block size, in one place. `static`: one value for the class, not per object. `constexpr`: a compile-time constant, so the arena's slot offsets are computed from it at compile time (`04` §5). `float` because component scales and locations take floats |
+| `static constexpr const TCHAR* CubeMeshPath = TEXT("/Engine/BasicShapes/Cube.Cube");` and `static constexpr float CubeSizeCm = 100.f;` | *Added in review:* the engine cube that both the blocks and the arena floor are made of, and its edge length. The path and the "divide by 100" were each written twice before (block and floor); now one constant each. A `constexpr` pointer to a string literal is a compile-time constant too (`04` §5) |
+| `UPROPERTY(VisibleAnywhere, Category = "Cover") TObjectPtr<…>` (three) | Each component pointer is a `UPROPERTY`, so the garbage collector sees the reference and the editor can show it. `VisibleAnywhere`: visible but not replaceable in the details panel, the usual choice for components made in the constructor. `TObjectPtr` is the UE5 form of a UObject member pointer (`06` §7) |
+| `Root` (`USceneComponent`) | An **unscaled** root. Smart Object slot offsets are relative to the actor's transform, so a scaled root would scale the offsets too |
+| `Mesh` (`UStaticMeshComponent`) | The visible, colliding block: the engine cube, scaled on the component, not on the actor |
+| `SmartObject` (`USmartObjectComponent`) | Owns the block's six cover slots in the Smart Object runtime |
+
+### B3. `Private\SQCoverBlock.cpp`
+
+| Line | What it does, and why |
+|---|---|
+| The includes | Full definitions of what the constructor uses ("include what you use"), so the file stays correct when other headers stop including them for us |
+| `PrimaryActorTick.bCanEverTick = false;` | A block never ticks. Without this line every block would register a tick function that does nothing; 100 of them would cost tick dispatch every frame (the overhead UE5-UpdateBudget measured) |
+| `Root = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));` | Creates the component as a **default subobject**: part of the class template, created in every instance, named "Root". Only valid in a constructor |
+| `Root->SetMobility(EComponentMobility::Static);` (and on `Mesh`) | The block never moves. Navigation treats it as fixed geometry and the renderer can cache it. Set before registration, which is allowed for objects spawned at runtime |
+| `SetRootComponent(Root);` | `Root` defines the actor's transform |
+| `static ConstructorHelpers::FObjectFinder<UStaticMesh> CubeMesh(CubeMeshPath);` | Finds the engine cube. `static`: the lookup runs once for the class, not once per block. `FObjectFinder` only works in constructors. `CubeMeshPath` is a class constant (B2) that the arena's floor uses too, so the path is written once. The asset is cooked because `DefaultGame.ini` always cooks `/Engine/BasicShapes` (`05` A8) |
+| `Mesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Mesh")); Mesh->SetupAttachment(Root);` | The visible block under the root. `SetupAttachment` is the constructor-time form of attaching (nothing is registered yet) |
+| `Mesh->SetStaticMesh(CubeMesh.Object);` | Uses the found cube |
+| `Mesh->SetRelativeScale3D(FVector(LengthCm, ThicknessCm, HeightCm) / CubeSizeCm);` | The engine cube is `CubeSizeCm` = 100 cm on each side, so dividing the size by it gives the scale 3.0 × 1.0 × 1.3 |
+| `Mesh->SetRelativeLocation(FVector(0.f, 0.f, HeightCm * 0.5f));` | The cube is centred on its origin; lifting it by half its height puts its base on the floor |
+| `Mesh->SetCollisionProfileName(UCollisionProfile::BlockAll_ProfileName);` | `BlockAll` (`Engine/Classes/Engine/CollisionProfile.h:190`; `Config/BaseEngine.ini:3104`): blocks the Visibility channel the cover test traces, and pawns, so agents walk around it. Colliding static geometry is exported into the navmesh, which therefore has holes where blocks stand |
+| `SmartObject = CreateDefaultSubobject<USmartObjectComponent>(…); SmartObject->SetupAttachment(Root);` | The Smart Object component is a scene component. At the unscaled root, its transform is the block's |
+| `SetCoverDefinition(…) { SmartObject->SetDefinition(Definition); }` | Passes the shared runtime definition to the component (`SO/Public/SmartObjectComponent.h:74`) |
+
+### B4. `Public\SQArenaSubsystem.h`
+
+**`struct FSQCoverSlot`**: one slot in a flat table.
+
+| Line | What it does, and why |
+|---|---|
+| `struct FSQCoverSlot` (no `USTRUCT`) | Plain C++. It holds no UObject pointer (`FSmartObjectSlotHandle` is a plain value), so the garbage collector doesn't need to see it, and nothing uses it in Blueprint or serialisation. Reflection would add generated code for nothing. *Alternative:* `USTRUCT()`, needed only to put it in a `UPROPERTY` |
+| `FVector Location = FVector::ZeroVector;` | The slot's world position on the floor. Default member initialisers mean a new slot is never uninitialised memory |
+| `int32 BlockIndex = INDEX_NONE; int32 SlotIndex = INDEX_NONE;` | The owning block and the slot's index in the definition (0..5). `INDEX_NONE` (-1) is Unreal's "unset" |
+| `FSmartObjectSlotHandle Handle;` | The Smart Object runtime's id for the slot, filled when the arena becomes ready. Claims (S3) take it |
+
+**`class USQArenaSubsystem : public UWorldSubsystem`**
+
+| Line | What it does, and why |
+|---|---|
+| `#include "Containers/BitArray.h"`, `"SmartObjectTypes.h"`, `"Subsystems/WorldSubsystem.h"` | `TBitArray` for the visibility table, `FSmartObjectSlotHandle` for the slot table, and the base class |
+| `UCLASS() class USQArenaSubsystem : public UWorldSubsystem` | One per world, created and destroyed with it. There is no authored map, so no placed actor would build the arena; a subsystem has exactly the right lifetime (the same reasoning as UE5-UpdateBudget's director). Not tickable: it waits for one engine event (the navmesh build finished) and one timeout timer, so it needs no per-frame tick (`06` §9, §13) |
+| `virtual void OnWorldBeginPlay(UWorld& InWorld) override;` | Called once when the world starts play, **before** any actor's `BeginPlay` (UE5-UpdateBudget `01b` #7). Blocks spawned here begin play with the rest of the level, after the Smart Object subsystem has initialised its runtime in its own `OnWorldBeginPlay` (`SO/Private/SmartObjectSubsystem.cpp:3235-3240`); a component that registers earlier is queued until then (`:842-848`) |
+| `virtual void Deinitialize() override;` | Called at world teardown; clears the timeout timer and unbinds from the navigation system's event |
+| `bool IsReady() const` | True once navigation is built and the tables are filled. The benchmark director (S2) waits for it |
+| `FSimpleMulticastDelegate OnArenaReady;` | A native multicast delegate without parameters: any number of listeners can bind. Native rather than dynamic, because no Blueprint listens and native delegates are cheaper (`06` §10) |
+| `GetSlots()`, `GetThreatPositions()` | Read-only access to the shared tables (`const&`: no copy) |
+| `bool IsSlotHidden(int32 ThreatIndex, int32 SlotIndex) const` | One lookup in the precomputed table: **the metrics never trace during a measured run** (`02` §4.2). Inline in the header because it runs for every agent every frame. It returns false before the arena is ready or for an index out of range, instead of asserting (*added in review*, `09` S1 audit): three cheap comparisons, so a caller that asks too early gets "not hidden", not a crash |
+| `GetSeed()`, `GetArenaHash()` | The seed used, and a CRC of the layout, so two runs can prove they built the same arena |
+| `static constexpr` layout constants | The numbers of `01` §6.1 in one place: 10 × 10 blocks 12 m apart with ±3 m jitter, a 130 m floor, slots 60 cm from the face and ±80 cm along the long sides, 10 threat positions, eye height 170 cm, probe height 90 cm (`02` §7) |
+| `DoesSupportWorldType(...) const override` (protected) | Game and PIE worlds only. World subsystems also exist in editor worlds (UE5-UpdateBudget `01b` #2), where spawning an arena into the level being edited would be a bug |
+| The private helpers | One function per job, in the order they run; each is explained with the `.cpp`. `HandleNavigationGenerationFinished(ANavigationData*)` is a `UFUNCTION()` because it is bound to a **dynamic** delegate, which finds its target by name through reflection (`06` §10). `class ANavigationData;` is a forward declaration: the header only names the type |
+| `UPROPERTY(Transient) TObjectPtr<USmartObjectDefinition> CoverDefinition;` | The one runtime definition all blocks share. Each block's Smart Object component also references it through its own `UPROPERTY` (`SO/Public/SmartObjectComponent.h:233-234`), so the blocks alone would keep it alive; the arena holds it as well so that its owner is explicit and it survives even before the first block exists. `Transient`: never saved. *Corrected in review:* an earlier comment claimed this was the only reference |
+| `UPROPERTY(Transient) TArray<TObjectPtr<ASQCoverBlock>> Blocks;` | The spawned blocks, visible to GC. A block's index is `FSQCoverSlot::BlockIndex` |
+| `TArray<FSQCoverSlot> Slots; TArray<FVector> ThreatPositions;` | The shared tables. Not `UPROPERTY`: no UObject inside |
+| `TBitArray<> HiddenTable;` | 10 threat positions × 600 slots = 6,000 booleans, one bit each (750 bytes). Row-major, so one threat's row is contiguous |
+| `FTimerHandle TimeoutTimer; double BuildStartRealSeconds; int32 Seed = 1; uint32 ArenaHash = 0; bool bSelfCheck = false; bool bReady = false;` | Timeout state and results. `double` for `FPlatformTime::Seconds()`, which counts from process start and needs the precision (`04` §6) |
+
+### B5. `Private\SQArenaSubsystem.cpp`
+
+**Includes and the `SQArena` namespace**
+
+| Line | What it does, and why |
+|---|---|
+| The includes | Brush component and body setup (nav bounds), static mesh actor (floor), navigation (`NavigationSystem.h`, `NavMesh/NavMeshBoundsVolume.h`, `NavigationData.h` and `NavigationSystemTypes.h` for the path test), the Smart Object component, definition, request types and subsystem, our block, the timer manager, and core helpers (command line, parsing, CRC, platform time and misc). `SmartObjectRequestTypes.h` was *added after the first S1 build failed* (`09` S1-a): the self-check builds an `FSmartObjectRequest`, whose type the subsystem header only forward-declares (`SO/Public/SmartObjectSubsystem.h:25, 27`; defined in `SO/Public/SmartObjectRequestTypes.h:86, 131`) |
+| `DEFINE_LOG_CATEGORY_STATIC(LogSQArena, Log, All);` | A log category used only in this file. `Log`: messages at Log and above are printed by default; `All`: the most verbose level it can be raised to at run time |
+| `namespace SQArena { … }` | File-local constants and helpers in a named namespace, so they can't collide with engine names (`04` §7) |
+| `constexpr float LongSideY = 0.5f * ASQCoverBlock::ThicknessCm + USQArenaSubsystem::SlotStandoffCm;` (110) and `ShortSideX` (210) | Slot positions derived from the block size at compile time. If the block changes size, the slots follow |
+| `const FVector SlotOffsets[] = { … };` | The six slots in the block's frame: (±80, ±110) on the long sides, (±210, 0) on the short sides. Adjacent slots are at least 1.6 m apart, so two different slots are never close enough to look like one (`01` §6.3). `const`, not `constexpr`, because `FVector`'s constructor isn't `constexpr` |
+| `constexpr int32 SlotsPerBlock = UE_ARRAY_COUNT(SlotOffsets);` | 6, counted by the compiler, so the count and the array can't disagree |
+| `NumBlocks` (100), `NumSlots` (600), `GridHalfExtentCm` (5400) | Derived once from the layout constants and used by the grid, the threat placement, the reservations and the self-check, so each fact lives in one place (*review*) |
+| `NavTimeoutRealSeconds = 60.0` | **Real** time: a fixed-step run can simulate many world seconds per real second, while the navmesh builds on worker threads in real time |
+| `CornerCm = GridHalfExtentCm + GridJitterCm + ShortSideX + 290.f` (6200) and its `static_assert` | The path-check corners lie beyond every block and slot (block centre + jitter + the farthest slot, plus a 2.9 m margin), and the `static_assert` proves at compile time that they stay on the 65 m half-floor. *Corrected before the first run:* a first draft used 58 m, where a jittered edge block could cover a corner and fail the check for the wrong reason; the value is now derived, so a layout change can't reintroduce that |
+| `NavBoundsHeightCm = 1000.f` | The bounds box spans 5 m below and above the floor |
+| `ThreatClearanceCm = 260.f` | A threat never stands inside or against a block (half-length 150 cm plus a margin) |
+| `MinThreatDistanceCm = 800.f`, `MinHiddenSlotsPerThreat = 256` | The cover query's distance filter (`02` §7) and the S1 pass threshold: at least 2 × 128 usable hidden slots from every threat position (`03`, S1) |
+| `bool IsPathComplete(const UNavigationSystemV1&, From, To)` | One synchronous path **test**: `TestPathSync(FPathFindingQuery(nullptr, *NavData, From, To))` (`NS/Public/NavigationSystem.h:679`). It builds no `UNavigationPath` object for the garbage collector, and a partial path counts as a failure (`NS/Private/NavMesh/PImplRecastNavMesh.cpp:310-314`; `RecastNavMesh.cpp:3920-3921`). The query takes the navmesh's default filter when none is given (`NS/Private/NavigationData.cpp:53-56`). *Changed in review:* the first version called `FindPathToLocationSynchronously` and read `IsValid() && !IsPartial()` from the path object |
+| `bool SpansArena(const UNavigationSystemV1&)` | The readiness test: `IsPathComplete` along the diagonal, from corner to opposite corner. Used by the build-finished handler and by the timeout's diagnostic line |
+| `void RequestSelfCheckExit(bool bPass)` | The self-check's verdict as the exit code, in one place: a normal exit on PASS (code 0); a **forced** exit with code 1 on FAIL, because only the forced path terminates the process with that code, while the normal path posts a quit message (`Core/Private/Windows/WindowsPlatformMisc.cpp:1493-1520`; the exception cvar it checks is off by default, `:140-144`). Used by the timeout and by `FinishArena` |
+
+**`DoesSupportWorldType`** returns true for `EWorldType::Game` and `EWorldType::PIE` only.
+
+**`OnWorldBeginPlay`**
+
+| Line | What it does, and why |
+|---|---|
+| `Super::OnWorldBeginPlay(InWorld);` | The base class first |
+| `FParse::Value(CommandLine, TEXT("SQSeed="), Seed);` | Reads `-SQSeed=N` if present; otherwise `Seed` stays 1 |
+| `bSelfCheck = FParse::Param(CommandLine, TEXT("SQArenaCheck"));` | A flag without a value |
+| `NavSys->OnNavigationGenerationFinishedDelegate.AddUniqueDynamic(this, &USQArenaSubsystem::HandleNavigationGenerationFinished);` | Listen for the navigation system's "a navmesh build finished" event **before** anything exists that could start a build, so no build can finish unheard. It is broadcast whenever the Recast generator's task count drops to zero (`NS/Private/NavMesh/RecastNavMeshGenerator.cpp:7614-7631` → `RecastNavMesh.cpp:3237-3240` → `NavigationSystem.cpp:4913-4915`), outside `WITH_EDITOR`, so in packaged builds too. `AddUniqueDynamic` binds a `UFUNCTION` by name and never twice (`06` §10). No navigation system → an Error line |
+| `BuildStartRealSeconds = FPlatformTime::Seconds(); BuildArena(InWorld);` | When the build started (timeout and logs), then spawn everything |
+| `SetTimer(TimeoutTimer, this, &USQArenaSubsystem::CheckNavigationTimeout, 60.f, /*bLoop*/ false);` | One timeout, not a poll. A timer bound to a UObject is skipped if the object is gone (`06` §9) |
+
+*Changed in review, then corrected by the first self-check run* (`09` S1 audit, S1-c): the first version polled every 0.1 s and called the arena ready when a navmesh existed, nothing was building, and a corner-to-corner path was complete. The review replaced the polling with the engine's build-finished event and dropped the path test. The next run showed why the path test must stay: the event **also fires for a build that covers almost nothing** (that run's bounds were empty, see `SpawnNavigationBounds`), and the arena reported ready on frame 1 with no usable navmesh. Now readiness is the event **plus** one path test per event, which costs nothing between events, and the timeout reports what it saw.
+
+**`Deinitialize`** clears the timeout timer and unbinds from the navigation system if the world still exists, then calls `Super::Deinitialize()` last: undo our own state before the base class tears down its own.
+
+**`BuildArena`**
+
+| Line | What it does, and why |
+|---|---|
+| `FRandomStream Stream(Seed);` | A seeded random sequence: the same seed gives the same numbers in every run and build. `FMath::Rand` would not (UE5-UpdateBudget `07`) |
+| `UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, ASQCoverBlock::CubeMeshPath);` | A synchronous load, once, before anything is measured. The floor isn't our own class, so there is no constructor to find the mesh in. A missing cube is logged as an Error (*added in review*): without it nothing has collision and the only other symptom would be the 60 s navigation timeout |
+| `const FTransform FloorTransform(FRotator::ZeroRotator, FVector(0.f, 0.f, -0.5f * FloorThicknessCm), FVector(FloorSizeCm, FloorSizeCm, FloorThicknessCm) / ASQCoverBlock::CubeSizeCm);` | The cube scaled to 130 m × 130 m × 20 cm, centred 10 cm below zero, so the **top face is at z = 0**. Scaling this actor is fine: it has no slot offsets |
+| `SpawnActor<AStaticMeshActor>` → `SetStaticMesh` → `SetCollisionProfileName(BlockAll)` | A plain spawn. Its components register during the spawn itself (`Engine/Private/Actor.cpp:4330-4336`), so the mesh is set on an already registered component; `SetStaticMesh` then updates collision and the navigation data itself (`StaticMeshComponent.cpp:2418-2429`). Swapping the mesh of a registered **Static** component is refused once the world has begun play (`StaticMeshComponent.cpp:2374-2383`), and `OnWorldBeginPlay` runs before that: the world calls it on every subsystem before the game mode's `StartPlay` (`World.cpp:6165-6174`), which leads to `AWorldSettings::NotifyBeginPlay` setting begun play (`WorldSettings.cpp:377`). `BlockAll` makes the floor walkable and part of the navmesh. *Corrected in review:* the first version used a deferred spawn and claimed it registered the components only in `FinishSpawning`; for an actor with a native root that is false, so the deferral did nothing |
+| `UE_LOG(LogSQArena, Error, …)` on a failed spawn | Spawning can fail (for example while the world shuts down). An Error line fails the run's log check instead of silently missing the floor |
+| `CoverDefinition = CreateCoverDefinition();` | One definition for all 100 blocks |
+| `const float GridOrigin = -SQArena::GridHalfExtentCm;` | -54 m: centres the 10 × 10 grid on the origin (columns at -54, -42, …, +54 m) |
+| `Blocks.Reserve(…); Slots.Reserve(…);` | Allocate once instead of growing 100 and 600 times |
+| `const float JitterX = Stream.FRandRange(…);` `const float JitterY = …;` `const float Yaw = Stream.RandRange(0, 1) * 90.f;` | **One random draw per statement.** C++ doesn't specify the order in which function arguments are evaluated, so `FVector(Stream.Draw(), Stream.Draw(), 0)` could swap the two draws between compilers and change the arena (`04` §8). Yaw is 0° or 90° |
+| `const FTransform BlockTransform(FRotator(0.f, Yaw, 0.f), Location);` | The block's place and heading |
+| `SpawnActorDeferred<ASQCoverBlock>` → `SetCoverDefinition` → `FinishSpawning` | The definition is set before `BeginPlay` registers the Smart Object component (B2). Deferral matters here and not for the floor: the Smart Object component registers with its subsystem in `BeginPlay`, which `FinishSpawning` triggers when the world is already playing; at `OnWorldBeginPlay` it would run later anyway, but the block stays correct if the arena is ever built after begin play. On failure: an Error line and `continue`, so the tables never point at a block that doesn't exist |
+| `const int32 BlockIndex = Blocks.Add(Block);` | `Add` returns the new element's index, which becomes the block's id in the slot table |
+| `Slot.Location = BlockTransform.TransformPosition(SQArena::SlotOffsets[SlotIndex]);` | Our own copy of where the Smart Object runtime puts each slot (block transform × slot offset). The self-check compares the two |
+| `Crc = FCrc::TypeCrc32(Location, Crc); Crc = FCrc::TypeCrc32(Yaw, Crc);` | Everything that defines a block goes into the hash. `TypeCrc32` adds a value's bytes to a running CRC-32 (`Core/Public/Misc/Crc.h:36-39`). *Changed in review:* a hand-written `HashVector` helper did the same for vectors only; the hash is bit-identical. The hash covers the exact bits, so it is compared between runs of **one binary**: the editor binary and the packaged game round some float expressions differently (`/fp:precise` vs `/fp:fast`, `01b` #21), and their hashes differ for the same seed while the layout is the same (`09` S1) |
+| `PlaceThreatPositions(Stream);` then the threat positions into the hash; `ArenaHash = Crc;` | The threat positions continue the **same** random stream, so they also depend only on the seed |
+| `SpawnNavigationBounds(World);` | Last, so the navmesh is built once with every block already in place |
+| The `Display` log line | Seed, counts, hash and build time (from `BuildStartRealSeconds`, taken just before the call): what a reviewer needs to compare runs |
+
+**`CreateCoverDefinition`**
+
+| Line | What it does, and why |
+|---|---|
+| `NewObject<USmartObjectDefinition>(this, TEXT("SQCoverDefinition"), RF_Transient)` | A data asset created as a plain object at runtime, owned by the subsystem, never saved. The way Epic's Smart Object tests build one (`SmartObjectsTestSuite/Private/SmartObjectsTest.cpp:65-72`) |
+| `FSmartObjectSlotDefinition& SlotDefinition = Definition->DebugAddSlot();` | Adds a default slot and returns a reference to it (`SO/Public/SmartObjectDefinition.h:326-327`). Named "Debug" and documented "for testing purposes", but not editor-only, and the only public way to add a slot from code. A shipping game would author the definition as an asset |
+| `SlotDefinition.Offset = FVector3f(Offset);` | The slot's position relative to the block (`SmartObjectDefinition.h:177-179`). `FVector3f` is the single-precision vector the definition stores |
+| `SlotDefinition.BehaviorDefinitions.Add(NewObject<USQCoverBehaviorDefinition>(Definition));` | One behavior definition per slot, owned by the definition, so validation passes (`01b` #19) |
+
+**`SpawnNavigationBounds`**
+
+| Line | What it does, and why |
+|---|---|
+| `SpawnActor<ANavMeshBoundsVolume>(…)` | The volume that tells navigation where to build. Its components register during the spawn, which already announces the volume, with an empty box (next rows). *Corrected in review:* the first version spawned it deferred "so its bounds exist before registration"; deferral doesn't delay registration for an actor with a native root (`Actor.cpp:4330-4336`) |
+| `UBodySetup* Body = NewObject<UBodySetup>(Brush, NAME_None, RF_Transient);` | A volume spawned at runtime has no editor brush. Outside the editor its brush component takes its bounds from `BrushBodySetup->AggGeom` (`Engine/Private/Components/BrushComponent.cpp:476-481`), so we give it a body setup |
+| `Body->AggGeom.BoxElems.Emplace(FloorSizeCm, FloorSizeCm, SQArena::NavBoundsHeightCm);` | One box of 130 m × 130 m × 10 m, centred on the actor. `FKBoxElem(X, Y, Z)` takes **full lengths**; the bounds use half of each (`Engine/Private/Collision/KAggregateGeom.cpp:391`). `Emplace` constructs the element in place |
+| `Brush->BrushBodySetup = Body;` | A public `UPROPERTY` (`Engine/Classes/Components/BrushComponent.h:28-30`). The brush keeps its `NoCollision` profile, so the box creates no physics body; it only defines bounds |
+| `Brush->UpdateBounds();` | **Added after S1-c.** A component's bounds are **cached**: computed when it registers and when it moves, not when its body setup changes. The brush registered during the spawn, with no body, so its cached bounds were a point at the origin; the navigation system reads that cached value (`Engine/Private/Actor.cpp:2272-2274`, from `NS/Private/NavigationSystem.cpp:4145`) and skipped it as "empty bounds" (`LogNavigationDirtyArea: Warning: … 1 empty bounds`). `UpdateBounds()` (`Engine/Classes/Components/SceneComponent.h:1130`) recomputes them from the box (`BrushComponent.cpp:476-481`) |
+| `NavSys->OnNavigationBoundsUpdated(Volume);` | **The call that gives the navmesh its real bounds.** Registration during the spawn already announced the volume (`PostRegisterAllComponents`, `NS/Private/NavMesh/NavMeshBoundsVolume.cpp:117-127`) while its box was still empty. This second announcement, with the box body in place, replaces that pending request instead of adding one (`NS/Private/NavigationSystem.cpp:4261-4298`), so the navmesh is built once, for the whole arena. The code comment says not to remove it |
+
+**`PlaceThreatPositions`** draws random points within ±54 m and keeps those at least 2.6 m (horizontally) from every block centre, until 10 are found or 10,000 attempts are spent. `ContainsByPredicate` takes a lambda that captures the candidate by reference (`04` §9). Fewer than 10 → an Error line.
+
+**`HandleNavigationGenerationFinished`** (the engine event)
+
+| Line | What it does, and why |
+|---|---|
+| `if (bReady \|\| World == nullptr \|\| NavSys == nullptr \|\| NavSys->IsNavigationBuildInProgress() \|\| !SQArena::SpansArena(*NavSys)) return;` | Finish once. A build has just finished; if more work is already queued (`IsBuildInProgressCheckDirty` counts the generator's running and pending tiles, `RecastNavMeshGenerator.cpp:7764-7769`), wait: that work's own completion fires the event again. And the navmesh must **span the arena**: the event also fires for a build that covers almost nothing (S1-c), so one path test per event decides. If it fails, the next build's event or the timeout decides |
+| `ClearTimer(TimeoutTimer); FinishArena(*World);` | Cancel the timeout; finish |
+
+**`CheckNavigationTimeout`**
+
+| Line | What it does, and why |
+|---|---|
+| `RealSecondsLeft = 60 - (FPlatformTime::Seconds() - BuildStartRealSeconds)`; if > 0, `SetTimer(…, RealSecondsLeft, false)` and return | Timers count **world** time; the navmesh builds on worker threads in **real** time. In a fixed-step run with fast frames, world time runs ahead, so the timer re-arms itself until 60 real seconds have passed |
+| Otherwise: an Error line saying whether a navmesh exists and whether the corner-to-corner path is complete, and in check mode `RequestSelfCheckExit(false)` | No usable navmesh after a minute of real time: the run is broken, the log says which half failed, and the queue job fails with exit code 1 |
+
+**`FinishArena`** logs how long navigation took (real time, from the event), fills the slot handles, traces the visibility table, sets `bReady`, broadcasts `OnArenaReady`, and in check mode passes the self-check's verdict to `RequestSelfCheckExit`: a normal quit on PASS (exit code 0), forced with code 1 on FAIL, so the queue job fails visibly.
+
+**`FillSlotHandles`**
+
+| Line | What it does, and why |
+|---|---|
+| `USmartObjectSubsystem::GetCurrent(&World)` | The world's Smart Object subsystem (`SO/Public/SmartObjectSubsystem.h:301`) |
+| `if (Slot.SlotIndex == 0) { … if (Block && Block->GetSmartObjectComponent()) GetAllSlots(…GetRegisteredHandle(), BlockSlots); }` | Once per block: the handles of all its slots (`SmartObjectSubsystem.h:536`), in definition order, the same order the table was filled in. A block destroyed before this point is skipped instead of dereferenced (*added in review*) |
+| `if (BlockSlots.IsValidIndex(Slot.SlotIndex)) { Slot.Handle = …; ++WithHandle; }` | A block that failed to register leaves its slots without handles |
+| `UE_CLOG(WithHandle != Slots.Num(), …, Error, …)` | *Added in review:* a definition that fails validation makes its components skip registration with only a `Log`-level line (`01b` #19), so every run, not just the self-check, now reports missing handles as an Error |
+
+**`BuildVisibilityTable`**
+
+| Line | What it does, and why |
+|---|---|
+| `const FCollisionQueryParams Params(SCENE_QUERY_STAT(SQArenaVisibility), false);` | Names the traces for profiling and traces simple collision (the blocks are boxes) |
+| `HiddenTable.Init(false, ThreatPositions.Num() * Slots.Num());` | Allocates every bit, all false |
+| `HiddenTable[ThreatIndex * Slots.Num() + SlotIndex] = World.LineTraceTestByChannel(Eye, Chest, ECC_Visibility, Params);` | "Is anything between the threat's eye and the slot at chest height?" A hit means hidden. Same channel and heights as the cover query's trace test (`02` §7), so the metric and the AI agree on "hidden". Pawns ignore Visibility (`Config/BaseEngine.ini:3110`), so agents never block it. 6,000 traces, once, before any agent exists |
+
+**`RunSelfCheck`** is the S1 check of `03`; every result goes on one `SQArenaCheck PASS/FAIL` log line.
+
+| Check | Code | Pass when |
+|---|---|---|
+| The Smart Object runtime knows every slot | `FindSmartObjects(FSmartObjectRequest(ArenaBox, FSmartObjectRequestFilter()), Found, FConstStructView())`: an unfiltered spatial query over the whole arena, without user data | `Found.Num()` = 600 |
+| Every slot has a handle, the runtime agrees on its position, and it lies on the navmesh | `GetSlotTransformChecked(Handle).GetLocation()` vs our location; `ProjectPointToNavigation(Location, Projected, (50, 50, 150))` | 600 handles, error < 1 cm, 600 on the navmesh |
+| Paths cross the arena | `IsPathComplete` on both diagonals and two edges, from one table of corner pairs | 4 of 4 |
+| Enough cover for 128 agents from every threat position | Per threat: hidden slots, and hidden slots at least 8 m from the threat | the smallest "hidden and ≥ 8 m" count ≥ 256 |
+| Layout | `Slots.Num()`, `ThreatPositions.Num()` | 600 and 10 |

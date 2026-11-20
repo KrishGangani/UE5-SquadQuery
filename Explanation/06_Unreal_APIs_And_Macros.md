@@ -12,8 +12,18 @@
 | 3 | `TargetRules`: `Type`, `DefaultBuildSettings`, `IncludeOrderVersion` | Phase 4 |
 | 4 | Descriptors: `LoadingPhase`, and plugin dependencies in `.uproject` / `.uplugin` | Phase 4 |
 | 5 | Config files: `config=Engine` / `config=Game` classes and their `Default*.ini` sections | Phase 4 |
+| 6 | `UCLASS`, `GENERATED_BODY`, the `.generated.h` include | S1 |
+| 7 | `UPROPERTY` object references, `TObjectPtr` | S1 |
+| 8 | `CreateDefaultSubobject`, `ConstructorHelpers::FObjectFinder`, `LoadObject`, `NewObject`, `SpawnActorDeferred` + `FinishSpawning` | S1 |
+| 9 | Timers: `FTimerManager::SetTimer` / `ClearTimer` | S1 |
+| 10 | Delegates: native `FSimpleMulticastDelegate`, and binding an engine dynamic delegate | S1 |
+| 11 | `UWorldSubsystem` | S1 |
+| 12 | Smart Objects at runtime: definition, component, subsystem | S1 |
+| 13 | Navigation at runtime: bounds volume, cached bounds, the build-finished event, path tests, projection | S1 |
+| 14 | Scene queries: `LineTraceTestByChannel`, collision profiles | S1 |
+| 15 | Core utilities: `FRandomStream`, `FCrc`, `TBitArray`, `FParse`, `FPlatformTime`, `RequestExit`, log macros | S1 |
 
-The APIs of the system itself (EQS, Smart Objects, world subsystems, navigation, CSV profiler) are researched in `01b` and enter this file from S1.
+Entries 6–15 entered with S1 (the arena). EQS, AI controllers and the CSV profiler enter with S2 and S3.
 
 ---
 
@@ -112,3 +122,122 @@ The APIs of the system itself (EQS, Smart Objects, world subsystems, navigation,
    RuntimeGeneration=Dynamic
    ```
 8. **In this project.** `DefaultEngine.ini` holds the navigation keys (`RecastNavMesh` and `NavigationSystemV1` are `config=Engine`: `Source/Runtime/NavigationSystem/Public/NavMesh/RecastNavMesh.h:570`, `NavigationSystem.h:290`). `DefaultGame.ini` holds the EQS slice. `DefaultInput.ini` holds the Enhanced Input classes (`05` A7–A9).
+
+## 6. `UCLASS`, `GENERATED_BODY` and the `.generated.h` include
+
+1. **What it is.** Macros read by UnrealHeaderTool (UHT), which writes extra C++ for every reflected class into `<File>.generated.h` and a generated `.cpp`.
+2. **Why it exists.** C++ has no runtime reflection. Unreal's garbage collector, serialiser, editor and Blueprint need to know a class's properties and functions at run time, so UHT generates that description.
+3. **How it works.** `UCLASS(specifiers)` marks the class; `GENERATED_BODY()` inside it expands to the generated declarations (`StaticClass()`, the object-system constructors). The generated header must be the **last** `#include` of the file, because it relies on everything declared before it.
+4. **When to use it.** Any class deriving from `UObject` (actors, components, subsystems, data assets).
+5. **When not to.** Plain data that no system needs to reflect: `FSQCoverSlot` is a plain struct for that reason (`05` B4).
+6. **Common mistakes.** The generated include not last (UHT error); a file name that doesn't match the `.generated.h` name; adding `_API` exports to classes no other module uses.
+7. **Example.** `UCLASS() class AMyActor : public AActor { GENERATED_BODY() public: AMyActor(); };`
+8. **In this project.** `USQCoverBehaviorDefinition` (`HideDropdown, NotBlueprintType`: an internal type), `ASQCoverBlock` and `USQArenaSubsystem` (plain `UCLASS()`, no export macro, as in UE5-UpdateBudget's game module).
+
+## 7. `UPROPERTY` object references and `TObjectPtr`
+
+1. **What it is.** `UPROPERTY()` on a member makes it part of reflection; for a UObject pointer that means the garbage collector **sees** the reference. `TObjectPtr<T>` is the UE5 member-pointer type for UObjects.
+2. **Why it exists.** Unreal's GC frees any UObject that nothing reachable references. A raw `UObject*` member that isn't a `UPROPERTY` is invisible to GC, so the object can be freed while you still point at it.
+3. **How it works.** GC walks every reflected reference from the root set. `TObjectPtr` behaves like a raw pointer in game code, and adds access tracking in editor builds.
+4. **When to use it.** Every UObject pointer a class keeps beyond one function.
+5. **When not to.** Non-UObject data; temporary local pointers.
+6. **Common mistakes.** Holding a runtime-created object (like a definition built with `NewObject`) only through a raw pointer; forgetting that a referenced object stays alive as long as the reference does.
+7. **Example.** `UPROPERTY(Transient) TObjectPtr<UMyData> Data;`
+8. **In this project.** `CoverDefinition` and `Blocks` in the arena subsystem are `UPROPERTY(Transient)`: the definition exists only at runtime, and this is the one strong reference GC can see. Specifiers used: `Transient` (never saved), `VisibleAnywhere` with `Category` on the block's components (shown in the editor, not replaceable).
+
+## 8. Creating objects and actors: `CreateDefaultSubobject`, `ConstructorHelpers::FObjectFinder`, `LoadObject`, `NewObject`, `SpawnActorDeferred` + `FinishSpawning`
+
+1. **What it is.** The ways this project creates things: components in a constructor, assets found in a constructor or loaded at run time, plain objects, and actors in two phases.
+2. **Why it exists.** Each runs at a different time in an object's life. Components belong to the class template; actors need a world; a deferred spawn exists so you can configure an actor after construction but before its construction script and `BeginPlay` run.
+3. **How it works.**
+   - `CreateDefaultSubobject<T>(Name)` (constructor only) creates a component that every instance gets.
+   - `ConstructorHelpers::FObjectFinder<T>(Path)` (constructor only) finds an asset; made `static`, it runs once per class.
+   - `LoadObject<T>(Outer, Path)` loads an asset synchronously at any time.
+   - `NewObject<T>(Outer, Name, Flags)` creates a plain UObject.
+   - `UWorld::SpawnActorDeferred<T>(Class, Transform)` (`Engine/Classes/Engine/World.h:3851`) constructs the actor and, **if it has a native root component, already registers its components** (`Engine/Private/Actor.cpp:4330-4336`; only a Blueprint class without a native root defers registration). `AActor::FinishSpawning(Transform)` (`Engine/Classes/GameFramework/Actor.h:3117`) then runs the construction script and `PostActorConstruction`, which calls `BeginPlay` if the world has begun play (`Actor.cpp:4415-4420, 4509`).
+   - `UWorld::SpawnActor<T>(Class, Transform)` does both steps at once.
+4. **When to use it.** Deferred spawning whenever something must be configured before the construction script or `BeginPlay` runs (here: a Smart Object component registers with its subsystem in `BeginPlay`).
+5. **When not to.** Synchronous loads during a measured run; `FObjectFinder` outside constructors (it asserts).
+6. **Common mistakes.** Believing a deferred spawn delays registration (for native-root actors it doesn't, `07` S1); swapping the mesh of a registered **Static** component after the world has begun play (refused, `StaticMeshComponent.cpp:2374-2383`); forgetting `FinishSpawning` (no construction script, no `BeginPlay`); scaling an actor whose child offsets must stay in centimetres.
+7. **Example.** `AMyActor* A = World.SpawnActorDeferred<AMyActor>(AMyActor::StaticClass(), T); A->Configure(); A->FinishSpawning(T);`
+8. **In this project.** Blocks are spawned deferred so their Smart Object definition is set before `BeginPlay` registers the component with the Smart Object subsystem. The floor and the nav bounds volume use a plain `SpawnActor`: deferral would change nothing for them (*corrected in review*; the first version claimed it set their mesh and box before registration). The floor's mesh can still be set afterwards because the arena is built in `OnWorldBeginPlay`, before the world has begun play.
+
+## 9. Timers: `FTimerManager::SetTimer` / `ClearTimer`
+
+1. **What it is.** The world's timer facility: call a function after a delay or repeatedly.
+2. **Why it exists.** Work that runs occasionally shouldn't need a per-frame tick.
+3. **How it works.** `SetTimer(Handle, Object, &Class::Method, Rate, bLoop)` wraps the method in a UObject delegate (`Engine/Public/TimerManager.h:167-169`). The manager checks the delegate is still bound before calling it (`Engine/Private/TimerManager.cpp:152`), so a destroyed object is skipped. Time is world time.
+4. **When to use it.** Delays, timeouts, periodic work with no per-frame need. Prefer an engine event over polling when one exists (§10, §13).
+5. **When not to.** Work that must happen at a fixed point in the frame (use a tick function); work timed in real time.
+6. **Common mistakes.** Losing the handle and never clearing a looping timer; assuming timers run in real time (in a fixed-step run with fast frames, world time runs ahead of the wall clock).
+7. **Example.** `World->GetTimerManager().SetTimer(Handle, this, &UMyThing::OnTimeout, 60.f, /*bLoop*/ false);`
+8. **In this project.** One timer: the arena's navigation timeout. It is a one-shot world-time timer that re-arms itself with the real time still left (`FPlatformTime`) until 60 real seconds have passed, and it is cleared when the arena is ready and in `Deinitialize`. *Changed in review:* the first version polled navigation every 0.1 s; readiness now comes from an engine event (§13).
+
+## 10. Delegates: native `FSimpleMulticastDelegate`, and binding an engine dynamic delegate
+
+1. **What it is.** A list of callbacks with no parameters (`Core/Public/Delegates/Delegate.h:377`). Its reflected cousin, the **dynamic** multicast delegate (`DECLARE_DYNAMIC_MULTICAST_DELEGATE_*`), stores its bindings as an object plus a function **name**, so it can be serialised and bound from Blueprint.
+2. **Why it exists.** One object announces an event; any number of others listen, without the announcer knowing them.
+3. **How it works.** Native: `AddUObject`/`AddLambda` bind; `Broadcast()` calls every binding; UObject bindings are skipped once their object is gone. Dynamic: `AddDynamic(this, &UMyClass::Handler)` / `AddUniqueDynamic` (never twice) bind a function that must be a `UFUNCTION()`, because the call goes through reflection by name; `RemoveAll(this)` unbinds.
+4. **When to use it.** Native for C++-only events of your own; dynamic when Blueprint must bind, or when the engine only offers a dynamic one.
+5. **When not to.** Exactly one listener (a single-cast delegate is clearer); a dynamic delegate on a hot path (a reflection call per binding).
+6. **Common mistakes.** Binding after the event already fired (check `IsReady()` first, or bind before anything can fire it); a dynamic handler without `UFUNCTION()` (the bind fails to find it); broadcasting while listeners can destroy the announcer.
+7. **Example.** `Arena->OnArenaReady.AddUObject(this, &UDirector::HandleArenaReady);` and `NavSys->OnNavigationGenerationFinishedDelegate.AddUniqueDynamic(this, &UMyThing::HandleNavBuilt);`
+8. **In this project.** `USQArenaSubsystem::OnArenaReady` (native) fires once; the director (S2) binds to it, or calls straight through if the arena is already ready. The arena itself binds the navigation system's dynamic `OnNavigationGenerationFinishedDelegate` (§13) in `OnWorldBeginPlay`, before it spawns anything, and unbinds in `Deinitialize`.
+
+## 11. World subsystems: `UWorldSubsystem`
+
+1. **What it is.** A UObject the engine creates once per world and destroys with it (`Engine/Public/Subsystems/WorldSubsystem.h`).
+2. **Why it exists.** World-wide services without a placed actor, and without a singleton that outlives the world.
+3. **How it works.** `Initialize` → `PostInitialize` → `OnWorldBeginPlay(UWorld&)` (`:43`, before any actor's `BeginPlay`) → … → `Deinitialize`. `DoesSupportWorldType` (`:66`) chooses which world types get one.
+4. **When to use it.** One service per world: here, building the arena.
+5. **When not to.** State that must survive a level change (game-instance subsystem); per-actor behaviour (component).
+6. **Common mistakes.** Spawning in `Initialize` (too early, the world isn't playing); forgetting that editor worlds get subsystems too.
+7. **Example.** `UCLASS() class UMyWorldService : public UWorldSubsystem { … virtual void OnWorldBeginPlay(UWorld&) override; };`
+8. **In this project.** `USQArenaSubsystem` builds in `OnWorldBeginPlay` and supports `Game` and `PIE` only.
+
+## 12. Smart Objects at runtime: definition, component, subsystem
+
+1. **What it is.** `USmartObjectDefinition` (a data asset: slots and their behaviors), `USmartObjectComponent` (puts a definition into the world), `USmartObjectSubsystem` (the runtime: registration, spatial queries, claims).
+2. **Why it exists.** Shared, reservable interaction points with a spatial index, so agents can find and reserve them.
+3. **How it works.**
+   - A definition is valid only if every slot has a behavior definition (`SO/Private/SmartObjectDefinition.cpp:205-222`); `DebugAddSlot()` adds a slot from code (`SO/Public/SmartObjectDefinition.h:326-327`).
+   - A component registers in `BeginPlay` in game worlds; before the runtime is initialised it is queued (`SO/Private/SmartObjectSubsystem.cpp:842-848`); the definition is validated at registration (`:749-770`).
+   - `GetAllSlots(ObjectHandle, OutSlots)` lists a registered object's slots (`SmartObjectSubsystem.h:536`); `GetSlotTransformChecked(SlotHandle)` gives a slot's world transform (`:861`); `FindSmartObjects(Request, OutResults, UserData)` searches a box (`:473`).
+4. **When to use it.** Anything agents reserve: seats, doors, cover.
+5. **When not to.** Points nobody reserves (a plain array is cheaper).
+6. **Common mistakes.** A slot without a behavior definition (the component silently doesn't register); changing a definition after registration; expecting the request box to test slot positions (it tests the object's location, `:2880`); expecting claimed slots in results (excluded by default, `01b` #18).
+7. **Example.** `FSmartObjectSlotDefinition& S = Def->DebugAddSlot(); S.Offset = FVector3f(0, 110, 0); S.BehaviorDefinitions.Add(NewObject<UMyBehavior>(Def));`
+8. **In this project.** One runtime definition with six slots, a component per block, and `GetAllSlots` to fill the arena's slot table. The self-check uses `FindSmartObjects` and `GetSlotTransformChecked` to prove the runtime agrees with the table.
+
+## 13. Navigation at runtime: bounds, build state, paths, projection
+
+1. **What it is.** `ANavMeshBoundsVolume` (where to build), `UNavigationSystemV1::OnNavigationBoundsUpdated` (announce bounds), `OnNavigationGenerationFinishedDelegate` (a build finished), `IsNavigationBuildInProgress` (is anything still queued?), `GetDefaultNavDataInstance` (the navmesh), `TestPathSync` (does a complete path exist?) and `ProjectPointToNavigation` (the nearest navmesh point).
+2. **Why it exists.** Agents need a navmesh, built where you say and when geometry exists.
+3. **How it works.** A registered bounds volume queues a bounds update with the volume's **cached** component bounds (`NS/Private/NavigationSystem.cpp:4145`); the navigation system's tick applies it, spawns the navmesh if none exists and marks tiles dirty; worker threads rebuild them (`01b` #9; `NS/Private/NavigationSystem.cpp:4301-4392`). When the generator's task count drops to zero it broadcasts `OnNavigationGenerationFinishedDelegate` (`01b` #20), for every build, however small. `TestPathSync(FPathFindingQuery(…))` (`NS/Public/NavigationSystem.h:679`) answers yes/no without creating a `UNavigationPath` object, and treats a partial path as no. `RuntimeGeneration=Dynamic` keeps the navmesh rebuildable at runtime (`05` A7).
+4. **When to use it.** Runtime-built levels, procedural content.
+5. **When not to.** Authored levels with a baked navmesh (Static is cheaper).
+6. **Common mistakes.** Trusting "build not in progress" right after the bounds appear (nothing queued yet); trusting the build-finished event alone (it fires for a near-empty build too, `07` S1); a volume with no bounds outside the editor (no brush); giving a registered volume its box without `UpdateBounds()` (the cached bounds stay a point); path endpoints inside obstacles.
+7. **Example.** `const ANavigationData* Nav = NavSys.GetDefaultNavDataInstance(); bool bOk = Nav && NavSys.TestPathSync(FPathFindingQuery(nullptr, *Nav, A, B));`
+8. **In this project.** One runtime volume with a box body and an explicit `UpdateBounds()` (`05` B5); readiness = the build-finished event + nothing queued + a complete corner-to-corner path; the self-check tests four paths and projects all 600 slots onto the navmesh.
+
+## 14. Scene queries: `LineTraceTestByChannel`, `FCollisionQueryParams`, collision profiles
+
+1. **What it is.** `UWorld::LineTraceTestByChannel(Start, End, Channel, Params)` (`Engine/Classes/Engine/World.h:2128`) returns true if anything blocks the line on that channel. Collision profiles set how a component responds to each channel.
+2. **Why it exists.** Visibility, line of fire and ground checks.
+3. **How it works.** Synchronous: the physics scene is queried immediately. `FCollisionQueryParams(SCENE_QUERY_STAT(Name), bTraceComplex)` names the query for profiling and chooses simple or per-triangle collision.
+4. **When to use it.** A yes/no answer now.
+5. **When not to.** Thousands of traces per frame (consider async traces, `01b` §3); when you need the hit point (use `LineTraceSingleByChannel`).
+6. **Common mistakes.** Tracing a channel the target ignores; agents blocking their own cover traces (here the `Pawn` profile ignores Visibility, `Config/BaseEngine.ini:3110`).
+7. **Example.** `bool bHidden = World.LineTraceTestByChannel(Eye, Chest, ECC_Visibility, Params);`
+8. **In this project.** 6,000 traces once at arena build fill the visibility table; blocks and floor use `BlockAll` (`:3104`).
+
+## 15. Core utilities: `FRandomStream`, `FCrc::TypeCrc32`, `TBitArray`, `FParse` / `FCommandLine`, `FPlatformTime`, `FPlatformMisc::RequestExit(WithStatus)`, log macros
+
+1. **What it is.** A seeded random generator (`Core/Public/Math/RandomStream.h:19`), a CRC-32 (`Core/Public/Misc/Crc.h:29`; `TypeCrc32(Value, Crc)` adds one value's bytes, `:36-39`), a packed bit array, command-line parsing, a high-resolution clock, process exit, and `DEFINE_LOG_CATEGORY_STATIC` / `UE_LOG` / `UE_CLOG`.
+2. **Why it exists.** Reproducibility (same seed, same arena), proof of reproducibility (a hash), compact tables, run options, timing, and clean exits from automated runs.
+3. **How it works.** `FParse::Value(CommandLine, TEXT("SQSeed="), Seed)` leaves `Seed` unchanged if the option is absent; `FParse::Param` tests a flag. `RequestExit(false)` asks the main loop to end; `RequestExitWithStatus(true, Code)` terminates the process with that exit code (`Core/Private/Windows/WindowsPlatformMisc.cpp:1474-1520`).
+4. **When to use it.** As above.
+5. **When not to.** `FMath::Rand` for anything that must repeat; a forced exit when data still has to be written.
+6. **Common mistakes.** Two random draws in one expression (unspecified order, `04` §8); expecting a non-forced exit to return a code.
+7. **Example.** `FRandomStream S(7); float X = S.FRandRange(-1.f, 1.f);`
+8. **In this project.** The arena layout, its hash, the visibility table, the `-SQSeed=` / `-SQArenaCheck` options, real-time timeouts, and the self-check's exit code (0 on PASS, 1 on FAIL).

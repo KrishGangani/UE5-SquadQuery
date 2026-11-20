@@ -63,7 +63,7 @@ D:\UNREAL PORTFOLIO\P07_SquadQuery\Tools\                    ← build/package/s
 | Module | Type | Responsibility | Depends on |
 |---|---|---|---|
 | `SquadQueryCore` (plugin) | Runtime | Squads, shared evaluation, assignment solver, claims, event policy, EQS contexts, settings, telemetry | `Core`, `CoreUObject`, `Engine`, `AIModule`, `SmartObjectsModule`, `GameplayTags`, `DeveloperSettings` (each added in the step that first uses it) |
-| `SquadQuery` (primary game module) | Game | Arena builder, cover blocks, agents and their brains (the three baselines and the SQ follower), query templates, benchmark director | `SquadQueryCore`, `AIModule`, `SmartObjectsModule`, `NavigationSystem` |
+| `SquadQuery` (primary game module) | Game | Arena builder, cover blocks, agents and their brains (the three baselines and the SQ follower), query templates, benchmark director | `SquadQueryCore`, `AIModule`, `SmartObjectsModule`, `NavigationSystem`, `GameplayTags` (S1: the Smart Object types it constructs contain tags) |
 | `Tools\` | Batch + Python | Build, package, smoke; CSV statistics; interleaved, CPU-pinned run orchestration | — |
 
 **The dependency rule:** game → plugin, never the reverse. The plugin knows nothing about the arena, the baselines or the benchmark. It needs only: squad members (a component), a threat location per squad, and a `UEnvQuery` whose items carry Smart Object slot handles.
@@ -88,12 +88,13 @@ D:\UNREAL PORTFOLIO\P07_SquadQuery\Tools\                    ← build/package/s
 
 **Telemetry:** a CSV category `SquadQuery` with per-frame counts (`Evaluations`, `QueriesStarted`, `QueriesFinished`, `ItemTests`, `Assignments`, `Switches`, `ClaimFailures`, `SolveUs`) and **one exclusive timing stat, `SquadQueryDecide`**, wrapped around every piece of decision code (§9). Counters are plain fields published once per frame, because a CSV stat call per event would itself cost time (UE5-UpdateBudget measured about 50 ns per `CSV_CUSTOM_STAT`).
 
-### 4.2 Game module `SquadQuery` (7 pieces)
+### 4.2 Game module `SquadQuery` (8 pieces)
 
 | Class | Base | Responsibility |
 |---|---|---|
-| `USQArenaSubsystem` | `UWorldSubsystem` (Game/PIE) | In `OnWorldBeginPlay`, from the seed: the floor, 100 cover blocks, one runtime `USmartObjectDefinition` with 6 slots, the navigation bounds volume (box body set from code, `01b` #9), the 10 threat positions and a **visibility table** (threat position × slot → hidden?) traced once, before agents exist. Reports "navigation ready" when `IsNavigationBuildInProgress()` is false |
-| `ASQCoverBlock` | `AActor` | A cube mesh scaled to 3.0 × 1.0 × 1.3 m (`BlockAll`) and a `USmartObjectComponent`. Spawned deferred so the definition is set before `BeginPlay` registers it (`01b` #11) |
+| `USQArenaSubsystem` | `UWorldSubsystem` (Game/PIE) | In `OnWorldBeginPlay`, from the seed: the floor (an `AStaticMeshActor`), 100 cover blocks, one runtime `USmartObjectDefinition` with 6 slots, the navigation bounds volume (box body set from code, `01b` #9), and the 10 threat positions. It then waits for the navigation system's build-finished event; **ready** = a build has finished, nothing else is queued, and a corner-to-corner path is complete (changed in S1: "not in progress" alone is true before any build has been queued, and the event alone also fires for a near-empty build, `01b` #20). A one-shot timer fails the arena after 60 s of real time. When ready it fills the slot handles, traces the **visibility table** (threat position × slot → hidden?) once, before agents exist, and broadcasts `OnArenaReady`. `-SQArenaCheck` runs the S1 self-check and quits with exit code 0 or 1 |
+| `ASQCoverBlock` | `AActor` | An unscaled root, a cube mesh scaled on its own component to 3.0 × 1.0 × 1.3 m (`BlockAll`), and a `USmartObjectComponent`. The root stays unscaled because slot offsets are relative to the actor (S1). Spawned deferred so the definition is set before `BeginPlay` registers it (`01b` #11) |
+| `USQCoverBehaviorDefinition` | `USmartObjectBehaviorDefinition` | *Added in S1.* An empty behavior type for cover slots. A Smart Object definition is valid only if every slot has a behavior definition (`01b` #19); without it no block would register |
 | `ASQAgent` | `ACharacter` | Capsule, character movement (450 cm/s), a cylinder mesh for visibility, a `USquadMemberComponent` and a `USQAgentBrainComponent`. Possessed by a plain `AAIController` |
 | `USQAgentBrainComponent` | `UActorComponent` | The decision logic in four modes (§9): **B0** polled per-agent query; **B1** + claims; **B2** event-driven + claims; **SQ** follows `OnAssignmentChanged`. Every mode ends in the same "set target" function, which owns the switch counter, the claim and `MoveToLocation` |
 | `USQCoverSlotGenerator` | `UEnvQueryGenerator_SmartObjects` | Sets the engine generator's protected settings (origin context, box half-extent, `bOnlyClaimable`) from code (`01b` #17). Every query in every configuration uses it, so the item source is identical |
@@ -198,7 +199,7 @@ The order among tickables isn't guaranteed by the engine **[inferred]**. Nothing
 
 | | Per-agent (B0, B1, B2) | Shared (SQ) |
 |---|---|---|
-| Generator | `USQCoverSlotGenerator`, origin = querier, box half-extent 15 m × 15 m × 2 m, `bOnlyClaimable = true` (engine default) | same generator, origin = `USquadQueryContext_Members`, same half-extent, `bOnlyClaimable = false` (the squad must see its own claimed slots) |
+| Generator | `USQCoverSlotGenerator`, origin = querier, box half-extent 15 m × 15 m × 2 m, `bOnlyClaimable = true` (engine default) | same generator, origin = `USquadQueryContext_Members`, same half-extent, `bOnlyClaimable = false` **and** the request filter's `bShouldIncludeClaimedSlots = true` (the squad must see its own claimed slots; the filter excludes claimed slots by default, `01b` #18) |
 | Test 1 | Trace from `USquadQueryContext_Threat` (+170 cm) to item (+90 cm), Visibility channel, **filter: must hit** (hidden) | same |
 | Test 2 | Distance item ↔ threat, **filter: ≥ 800 cm** | same |
 | Test 3 | Distance item ↔ querier, **score**: closer is better | — (the personal score is the solver's cost) |
@@ -231,7 +232,7 @@ The order among tickables isn't guaranteed by the engine **[inferred]**. Nothing
 | A claim held by a destroyed agent | `EndPlay` releases its claim (agents) and `USquad` releases claims of members that leave | `01b` #7 (agents must release their own slots) |
 | Two squads compete for one slot | Assignment and claiming happen in the same game-thread handler, after a `CanBeClaimed` check, so a claim made by SQ can't lose a race **[inferred]**. Any failure is counted and the squad re-evaluates | `01b` #7, #8 |
 | A per-agent claim races (B1, B2) | Expected (H5). Counted; the agent re-queries next frame | `01b` #8 |
-| Navigation not ready when agents spawn | Agents spawn only after `IsNavigationBuildInProgress()` is false; the director logs the build time | `01b` #9 |
+| Navigation not ready when agents spawn | Agents spawn only after `OnArenaReady`, whose rule is in §4.2 (`USQArenaSubsystem`); the arena logs the build time | `01b` #9, #20 |
 | The runtime Smart Object definition is collected | The arena subsystem holds it in a `UPROPERTY` | GC basics |
 | A StateTree event queue overflows (S8 adapter) | One event per assignment change, never per frame (cap 64) | `01b` #12 |
 | Smart Object subsystem isn't thread-safe | Everything runs on the game thread | `01b` §3 |
@@ -290,3 +291,7 @@ The workload must be identical across B0–B2 and SQ, so **every configuration e
 | Arena built in code: runtime Smart Object definition, runtime nav bounds volume, `RuntimeGeneration=Dynamic` | No authored map or assets; seeded and reviewable (`01b` #9, #11) |
 | `MaxEvaluationsPerFrame` cap | Event bursts (H6) |
 | Every timed run pinned to the performance cores (the run script pins itself; each directly launched game inherits the mask) | Hybrid CPU (`01b` B-2) |
+| **S1:** `USQCoverBehaviorDefinition` added; the block's root stays unscaled; navigation readiness also requires a complete corner-to-corner path; the floor is an `AStaticMeshActor`; `-SQArenaCheck` self-check | Smart Object validation (`01b` #19); slot offsets are relative to the actor; "no build in progress" is true before a build is queued; the floor needs no class of its own; the cooked-build proof of `03` S1 |
+| **S1:** the shared query's request filter must include claimed slots | The filter excludes them by default (`01b` #18) |
+| **S1:** readiness waits for the navigation system's build-finished event (plus the path test) instead of polling; the bounds volume calls `UpdateBounds()` after it gets its box | The review found the engine event (`05` B5); the self-check then found that the volume's cached bounds were empty and that the event also fires for a near-empty build (`01b` #20, `09` S1-c) |
+| **S1:** the game module also depends on `GameplayTags` directly | It constructs Smart Object request filters and slot definitions, which contain tag containers; the link failed without it (`09` S1-b) |
