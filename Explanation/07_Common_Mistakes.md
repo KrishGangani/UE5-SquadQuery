@@ -1,0 +1,23 @@
+# 07 · Common Mistakes: SquadQuery
+
+**Rule:** for every module, the mistakes that are easy to make here, **how to spot them, how to prevent them and how to debug them**. Mistakes that the checks **actually caught in this project** are marked ⚠ caught; mistakes caught by *other* portfolio projects first and avoided here are marked ⚠ seen elsewhere. This file grows with every step.
+
+---
+
+## Phase 4: project, plugin and configuration
+
+| Mistake | How to spot it | How to prevent it | How to debug it |
+|---|---|---|---|
+| ⚠ seen elsewhere: **no `DefaultInput.ini`** in a project with the Enhanced Input plugin enabled (the default) | `LogEnhancedInput: Warning: … does not have a valid PlayerInput object` on every map load | Set `DefaultPlayerInputClass` and `DefaultInputComponentClass` to the Enhanced Input classes, as Epic's templates do (`05` A9) | Grep the game log for `LogEnhancedInput` |
+| ⚠ caught: **committing what the editor wrote into config.** The first cook added an Android File Server section with a generated security token to `DefaultEngine.ini` | `git status` shows `DefaultEngine.ini` modified after a build you didn't edit config for | Read every config diff before committing. Remove the cause, not just the text: disable the plugin that writes it (`"AndroidFileServer", "Enabled": false` in the `.uproject`) and delete the section (`05` A1, A7). An intermediate fix (keeping the section with an empty token) was replaced by this one | `git diff SquadQuery/Config`; the writer is `AndroidFileServerRuntimeSettings.cpp:31-36` |
+| Passing command-line flags the engine doesn't parse (for example `-ExitAfterSeconds`, which 5.8.4 ignores) | The flag has no effect; the run behaves as if it weren't there | Check that the engine parses a flag (grep for it in `Source/Runtime`) before relying on it | Grep the engine source for the flag name |
+| **Forgetting to enable SmartObjects** (it is off by default, `SmartObjects.uplugin:13`) | Link errors or "module not found" once code uses `SmartObjectsModule`; Smart Object components never register | Enable it in the `.uproject` **and** declare it in the `.uplugin` of the plugin that uses it | `-log` start-up lines list the loaded plugins |
+| A plugin module depends on another plugin's module without declaring that plugin | UBT warning "Plugin '…' does not list plugin '…' as a dependency" (`UEBuildTarget.cs:1578`) | `"Plugins": [...]` in the `.uplugin` | Read the UBT log; the build must have 0 warnings |
+| The game module depends on a plugin module the `.uproject` doesn't list | UBT warning "… does not list plugin '…' as a dependency, but module '…' depends on '…'" (`UEBuildTarget.cs:1687`) | List every such plugin in the `.uproject`, even if it is `EnabledByDefault` | Same |
+| **A config section in the wrong `.ini`** (for example the EQS manager, `config=Game`, written into `DefaultEngine.ini`) | The value seems to have no effect; there is no error | Check the class's `UCLASS(config=…)` before choosing the file (`06` §5) | In a running game, the console command `getall EnvQueryManager MaxAllowedTestingTime` prints the live value on every instance (`GETALL`, `Source/Runtime/CoreUObject/Private/UObject/Obj.cpp:4909`) |
+| **Leaving the navmesh `Static`** when geometry is spawned at runtime | Agents don't move; `MoveToLocation` fails; the navmesh doesn't cover spawned blocks | `RuntimeGeneration=Dynamic` for `RecastNavMesh` (`05` A7) | `show Navigation` in a game window; `FindPathSync` result in the log |
+| Two modules with the same name (for example a plugin named like the game) | UBT silently uses only the first `.Build.cs` it finds (`RulesAssembly.cs:199-206`) | Unique names: `SquadQuery` (game) and `SquadQueryCore` (plugin) | Compare the module list in the UBT log with the folders on disk |
+| Making a dependency public "to be safe" | Rebuilds touch more modules than the change warrants | Public only when a public header includes the dependency (`06` §2) | UBT's action count after a header change |
+| Writing batch files with LF line endings | Labels and `goto` can misbehave | `.gitattributes` keeps `*.bat` as CRLF; check with `file *.bat` | Run the script from `cmd` with echo on |
+| Building or running the game outside the queue | Another project's benchmark is corrupted by the CPU load | Every Unreal job goes through `tools\ue_queue.py` | The queue's `history.jsonl` lists every job |
+| Assuming the launcher engine can build every configuration | The Test configuration fails: "Targets cannot be built in the Test configuration with this engine distribution" (UE5-UpdateBudget `09` F-3a) | Headline builds are packaged **Development** | Read the BuildCookRun output |
