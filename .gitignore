@@ -29,3 +29,6 @@ Benchmarks/*_console.txt
 
 # Local drafts (code and doc fragments parked between steps). Never commit.
 _wip/
+
+# Portfolio export for Google Drive (images, video, description). Never commit.
+Portfolio/
