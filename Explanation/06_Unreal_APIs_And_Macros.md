@@ -22,6 +22,12 @@
 | 13 | Navigation at runtime: bounds volume, cached bounds, the build-finished event, path tests, projection | S1 |
 | 14 | Scene queries: `LineTraceTestByChannel`, collision profiles | S1 |
 | 15 | Core utilities: `FRandomStream`, `FCrc`, `TBitArray`, `FParse`, `FPlatformTime`, `RequestExit`, log macros | S1 |
+| 16 | Characters and AI movement: `ACharacter`, `MoveToLocation`, `AutoPossessAI` | S2 |
+| 17 | `UTickableWorldSubsystem` | S2 |
+| 18 | The CSV profiler: categories, events, custom and timing stats, metadata | S2 |
+| 19 | Files and paths: `FFileHelper::SaveStringToFile`, `FPaths::ProjectSavedDir` | S2 |
+| 20 | View targets and class defaults: `ACameraActor`, `SetViewTarget`, `bAutoManageActiveCameraTarget`, `GetDefault<T>()` | S2 |
+| 21 | Game modes: `AGameModeBase`, `DefaultPawnClass`, `GlobalDefaultGameMode` | S2 |
 
 Entries 6–15 entered with S1 (the arena). EQS, AI controllers and the CSV profiler enter with S2 and S3.
 
@@ -241,3 +247,69 @@ Entries 6–15 entered with S1 (the arena). EQS, AI controllers and the CSV prof
 6. **Common mistakes.** Two random draws in one expression (unspecified order, `04` §8); expecting a non-forced exit to return a code.
 7. **Example.** `FRandomStream S(7); float X = S.FRandRange(-1.f, 1.f);`
 8. **In this project.** The arena layout, its hash, the visibility table, the `-SQSeed=` / `-SQArenaCheck` options, real-time timeouts, and the self-check's exit code (0 on PASS, 1 on FAIL).
+
+## 16. Characters and AI movement: `ACharacter`, `UCharacterMovementComponent`, `AAIController::MoveToLocation` / `StopMovement`, `AutoPossessAI`, `OnRequestFinished`
+
+1. **What it is.** A pawn with a capsule and character movement (walking, gravity, steps), possessed by an AI controller whose path-following component steers it along navmesh paths.
+2. **Why it exists.** The standard way to move a humanoid in Unreal, shared by players and AI.
+3. **How it works.** `AutoPossessAI = EAutoPossessAI::Spawned` makes the engine spawn `AIControllerClass` for a spawned pawn and possess it. `MoveToLocation(Dest, AcceptanceRadius, bStopOnOverlap, bUsePathfinding, bProjectDestinationToNavigation, bCanStrafe, …)` (`AIModule/Private/AIController.cpp:612`) builds a move request and **finds the path synchronously** (`:899-906`), then path following drives `UCharacterMovementComponent` each frame. It returns `Failed`, `AlreadyAtGoal` or `RequestSuccessful` (`AIModule/Classes/Navigation/PathFollowingComponent.h:154-160`); an accepted request has an id (`GetCurrentMoveRequestID()`, `AIController.h:236`). When the request ends, the path-following component broadcasts `OnRequestFinished(FAIRequestID, const FPathFollowingResult&)` (`PathFollowingComponent.h:223, 229`); the result's flags say whether it succeeded, was interrupted by a newer request or `StopMovement` (`IsInterrupted()`), or ended short of the goal (`Blocked`, `OffPath`, `InvalidPath`). Blocked movement is detected by path following itself: under 10 cm of progress across 10 samples 0.5 s apart (`AIModule/Private/Navigation/PathFollowingComponent.cpp:138-144`). `StopMovement()` (`AIController.h:227`) aborts the move.
+4. **When to use it.** Any AI that walks on a navmesh.
+5. **When not to.** Thousands of agents (Mass); per-frame re-targeting (every call is a path query).
+6. **Common mistakes.** Expecting path following to avoid other agents: it plans around navmesh obstacles only, so agents without avoidance push into each other (turn on `bUseRVOAvoidance`, `CharacterMovementComponent.h:1065`, or use crowd following); calling `MoveToLocation` every frame for the same goal; ignoring how a move ended, so a blocked agent stands still forever; reacting to *every* finished request, including the ones your own new request interrupted; forgetting `bProjectDestinationToNavigation` for goals slightly off the navmesh; leaving `bOrientRotationToMovement` off, so agents slide sideways.
+7. **Example.** `Cast<AAIController>(Pawn->GetController())->MoveToLocation(Goal, 50.f, false, true, true, false);`
+8. **In this project.** `ASQAgent` (450 cm/s, RVO avoidance, a plain `AAIController`); `USQAgentBrainComponent` is the only caller of `MoveToLocation`, so move requests are counted in one place, and it listens to `OnRequestFinished` to retry a move that ended short of the slot, the same way in every configuration (`05` C3).
+
+## 17. Tickable world subsystems: `UTickableWorldSubsystem`
+
+1. **What it is.** A world subsystem that is also a tickable object: the engine calls its `Tick(float)` every frame.
+2. **Why it exists.** World services that need per-frame work without an actor.
+3. **How it works.** It ticks in the tickables pass of the frame (after `TG_PostPhysics`, UE5-UpdateBudget `01b` #2). `GetStatId()` names it for the stats system (`RETURN_QUICK_DECLARE_CYCLE_STAT`).
+4. **When to use it.** A per-frame service with world lifetime.
+5. **When not to.** Work that must run at a chosen tick group (use your own tick function), or work that needs no per-frame update (use timers, `06` §9).
+6. **Common mistakes.** Forgetting `GetStatId`; assuming an order between tickables.
+7. **Example.** `virtual void Tick(float DeltaTime) override; virtual TStatId GetStatId() const override;`
+8. **In this project.** `USQBenchmarkSubsystem` runs the timeline and metrics; the order among tickables doesn't matter here (`02` §6).
+
+## 18. The CSV profiler: `CSV_DEFINE_CATEGORY`, `CSV_EVENT`, `CSV_CUSTOM_STAT`, `CSV_SCOPED_TIMING_STAT`, `CSV_SCOPED_TIMING_STAT_EXCLUSIVE`, `CSV_METADATA`
+
+1. **What it is.** Macros that write one row per frame into a CSV capture: timings, counters, events and metadata (`Core/Public/ProfilingDebugging/CsvProfiler.h`).
+2. **Why it exists.** Frame-by-frame numbers from packaged builds, cheap enough to leave on.
+3. **How it works.** `CSV_DEFINE_CATEGORY(Name, bOnByDefault)` declares a column group. `CSV_SCOPED_TIMING_STAT(Category, Stat)` times a scope; `CSV_SCOPED_TIMING_STAT_EXCLUSIVE(Stat)` (`CsvProfiler.h:129-131`) records into the `Exclusive` category (on by default, `Core/Private/ProfilingDebugging/CsvProfiler.cpp:73`), and time spent in a nested exclusive scope is not counted twice. `CSV_CUSTOM_STAT(Category, Stat, Value, Op)` (`CsvProfiler.h:155`) records a number. `CSV_EVENT(Category, Text)` marks a frame; the capture can start and stop on events (`-csvStartOnEvent=`, `-csvStopOnEvent=`, parsed at `CsvProfiler.cpp:5081, 5090`). `CSV_METADATA(Key, Value)` (`:85`) is written into the file's last row.
+4. **When to use it.** Anything you want as a per-frame number in a benchmark.
+5. **When not to.** Per-item stats in hot loops (UE5-UpdateBudget measured about 50 ns per custom stat); Shipping builds (compiled out).
+6. **Common mistakes.** Recording a stat per agent instead of once per frame; expecting a category that is off by default to appear; forgetting that **engine code inside your exclusive scope may open its own**: the path query inside `MoveToLocation` records into `Exclusive/GameThread/Pathfinding` (`NS/Private/NavMesh/RecastNavMesh.cpp:3839`) and is subtracted from yours, so a total must add it back.
+7. **Example.** `CSV_SCOPED_TIMING_STAT_EXCLUSIVE(SquadQueryDecide);` at the top of a decision function.
+8. **In this project.** `SquadQueryDecide` (exclusive) wraps all decision code; AI time = `EnvQueryManager` + `SquadQueryDecide` + `Pathfinding`, summed per frame (`05` C5); `SQBench/Metrics` times the metrics; `SQBench/InCover`, `Awaiting`, `ConflictSlots` are per-frame counts; `BenchStart`, `Threat`, `BenchEnd` are events; run metadata identifies the capture.
+
+## 19. Files and paths: `FFileHelper::SaveStringToFile`, `FPaths::ProjectSavedDir`
+
+1. **What it is.** Write a string to a file; the project's `Saved` folder.
+2. **Why it exists.** Platform-independent file output.
+3. **How it works.** `SaveStringToFile(Text, Path)` creates missing folders and returns false on failure. In a packaged build `ProjectSavedDir()` is `<build>/SquadQuery/Saved/`.
+4. **When to use it.** Small reports after a run.
+5. **When not to.** During a measured window (disk I/O can stall a frame).
+6. **Common mistakes.** Ignoring the return value; writing inside the capture.
+7. **Example.** `FFileHelper::SaveStringToFile(Report, *FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("SQRuns"), Tag + TEXT("_agents.csv")));`
+8. **In this project.** The run report is written one frame after `BenchEnd`; failure is an Error line.
+
+## 20. View targets: `ACameraActor`, `APlayerController::SetViewTarget`; class defaults: `GetDefault<T>()`
+
+1. **What it is.** A placed camera, the call that makes a player controller look through it, and read-only access to a class default object.
+2. **Why it exists.** A fixed benchmark view without a player pawn; class constants without spawning.
+3. **How it works.** The view target is the actor whose camera the player sees. `GetDefault<T>()` returns the class default object.
+4. **When to use it.** Fixed or scripted cameras; reading defaults.
+5. **When not to.** Changing a class default object at run time.
+6. **Common mistakes.** Setting the view target once and losing it when the controller possesses a pawn later: possession re-targets the view while `bAutoManageActiveCameraTarget` is true (`Engine/Classes/GameFramework/PlayerController.h:299`). Calling instance getters on a class default object: its components never registered, so for example `GetSimpleCollisionHalfHeight()` returns 0 on a character's default (`Engine/Private/Character.cpp:234-239`); use `GetDefaultHalfHeight()` (`:263-269`).
+7. **Example.** `PC->bAutoManageActiveCameraTarget = false; PC->SetViewTarget(Camera);` and `GetDefault<AMyCharacter>()->GetDefaultHalfHeight()`.
+8. **In this project.** A top-down camera set once: the player has no pawn (§21) and auto-management is off (*changed in review*; the first version re-applied it every frame, as UE5-UpdateBudget does). The agent's spawn height comes from `GetDefault<ASQAgent>()->GetDefaultHalfHeight()`.
+
+## 21. Game modes: `AGameModeBase`, `DefaultPawnClass`, `GlobalDefaultGameMode`
+
+1. **What it is.** The game mode is the server-side rules object of a world: it logs players in and gives each a pawn of `DefaultPawnClass` at a `PlayerStart`. `GlobalDefaultGameMode` in `[/Script/EngineSettings.GameMapsSettings]` chooses it for maps that don't override it.
+2. **Why it exists.** One place for "what happens when a player joins".
+3. **How it works.** `RestartPlayer` spawns the default pawn class at a start spot; if the class is null it skips the spawn and calls `FailedToRestartPlayer`, which only makes the controller inactive (`Engine/Private/GameModeBase.cpp:1292-1305`; `Controller.cpp:115-118`; `PlayerController.cpp:354-359`). `DefaultPawnClass` is a class property, not a config key (`GameModeBase.h:106-108`), so changing it needs a subclass.
+4. **When to use it.** Any time the default player setup gets in the way.
+5. **When not to.** Per-level rules a designer must change (then a Blueprint game mode or the map's world settings).
+6. **Common mistakes.** Expecting `DefaultPawnClass=` in an ini file to work (not config); forgetting that a map's world settings can override the global game mode (check the `LogLoad: Game class is '…'` line).
+7. **Example.** `AMyGameMode::AMyGameMode() { DefaultPawnClass = nullptr; }` and `GlobalDefaultGameMode=/Script/MyGame.MyGameMode`.
+8. **In this project.** `ASQGameMode` gives the player no pawn, so no `ADefaultPawn` collides with agents at the template map's `PlayerStart` and nothing takes the view target back (`05` C2b).

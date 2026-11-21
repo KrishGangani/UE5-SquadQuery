@@ -68,6 +68,16 @@ public:
 			&& HiddenTable[ThreatIndex * Slots.Num() + SlotIndex];
 	}
 
+	/**
+	 * Valid cover from a threat position: hidden from it and at least MinThreatDistanceCm away, the same two conditions
+	 * as the cover query's filters (02 section 7). The one definition the self-check and every metric use.
+	 */
+	bool IsValidCover(int32 ThreatIndex, int32 SlotIndex) const
+	{
+		return IsSlotHidden(ThreatIndex, SlotIndex)
+			&& FVector::DistSquared2D(ThreatPositions[ThreatIndex], Slots[SlotIndex].Location) >= FMath::Square(MinThreatDistanceCm);
+	}
+
 	int32 GetSeed() const { return Seed; }
 
 	/** CRC of every block transform and threat position: equal seeds must give equal hashes. */
@@ -83,6 +93,7 @@ public:
 	static constexpr int32 NumThreatPositions = 10;
 	static constexpr float ThreatEyeHeightCm = 170.f;      // a standing shooter
 	static constexpr float SlotProbeHeightCm = 90.f;       // a crouched agent's chest
+	static constexpr float MinThreatDistanceCm = 800.f;    // a cover slot is at least this far from the threat
 
 protected:
 	//~ Begin UWorldSubsystem

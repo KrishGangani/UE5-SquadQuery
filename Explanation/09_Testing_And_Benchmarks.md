@@ -116,6 +116,87 @@ Not applied: computing `BlockIndex`/`SlotIndex` from the table index and filling
 
 ---
 
+## S2 · Agents, the benchmark director and the measurement scripts (2026-11-21)
+
+**What S2 had to show** (`03` S2): one fixed-step packaged run at N = 32 produces a CSV with the `SQBench` and global columns; the scripted test oracle gives 0 conflicts and a time to cover close to distance ÷ speed; the statistics script matches a hand calculation; the run's affinity mask is recorded. The `SquadQueryDecide` / `EnvQueryManager` nesting check needs EQS queries, so it moves to S3, where the first queries run; the nesting of the engine's own `Pathfinding` scope inside ours is checked here.
+
+| # | Job | Result |
+|---|---|---|
+| S2-a | `20261121_052141_d75641` | ✅ exit 0 in 143.2 s. Both targets built with **0 errors, 0 warnings**; cook `Success - 0 error(s), 0 warning(s)`. Packaged arena check PASS with the same counts as S1-d6 and **0 warnings** (the crowd-manager warning of S1 is gone); `LogLoad: Game class is 'SQGameMode'`. Batch `2026-11-21_061758_S2check`: priming run + 1 run, Scripted, N = 32, both exit 0, 0 log errors. The run revealed stuck agents (below), so S2 was run again |
+| S2-b | `20261121_062200_cef0bb` | ✅ exit 0 in 163.7 s. Both targets built with **0 errors, 0 warnings**; cook `Success - 0 error(s), 0 warning(s)`. Batch `2026-11-21_071205_S2check2`: priming run + 2 runs, Scripted, N = 32, all exit 0, **0 warnings and 0 errors** in every run log |
+
+**S2-a, the checks:**
+
+| # | Check | Result |
+|---|---|---|
+| S2-a1 | The capture exists and is complete | ✅ 3,600 frames (60 s at the fixed 60 Hz step), finalised; events: 10 × `SQBench/Threat`, `SQBench/BenchEnd`, 2 × `PSO`, 1 × `GC` |
+| S2-a2 | The columns exist | ✅ `Exclusive/GameThread/EnvQueryManager`, `…/SquadQueryDecide`, `…/Pathfinding`, `SQBench/InCover`, `SQBench/Awaiting`, `SQBench/ConflictSlots`, `SQBench/GameThread/Metrics` (the timing stat's real column name), `GameThreadTime`, `FrameTime` |
+| S2-a3 | **The engine's path query nests inside ours** | ✅ `Pathfinding` is non-zero exactly on event frames (max 0.122 ms) while `SquadQueryDecide` peaks at 0.142 ms: the path query's time is recorded separately, which is why AI time adds it (`05` C5). `EnvQueryManager` costs 0.4 µs per frame with no query at all |
+| S2-a4 | **The statistics script matches a hand calculation** | ✅ An independent calculation from the raw CSV (per-frame sum of the three AI columns; linear-interpolation percentiles written out by hand) gives AI mean 0.001151 ms, AI p99 0.001701 ms, `GameThreadTime` median 1.61435 ms and p95 2.23627 ms: identical to the manifest to the last digit |
+| S2-a5 | The affinity mask is recorded | ✅ `cpu_affinity: 0xFFFF (performance cores only; hybrid CPU)` in the environment record |
+| S2-a6 | **The oracle: 0 conflicts** | ✅ `conflict_onsets = 0`, `conflict_agent_frames = 0` |
+| S2-a7 | **The oracle: time to cover ≈ distance ÷ speed** | ✅ Walk ratio median **1.00** (p95 1.90) over the agents that walked at least 1 m: an agent that decides on the event frame and walks straight arrives in distance ÷ 450 cm/s. The p95 is the detours around blocks |
+| S2-a8 | Every agent reaches cover | ❌ **19 of 320 agent-events (5.9%) not in cover before the next event**, with 16 move retries. Every stuck agent stood with its capsule against another agent's (centres 68–78 cm apart; the capsule radius is 34 cm): path following plans around blocks, not around agents, so an agent whose path ran through a squadmate already in a neighbouring slot pushed into it until the move ended blocked, and the retry met the same obstacle. **Fix:** RVO avoidance on the agents' character movement (`05` C2; `07` S2) |
+| S2-a9 | Time to cover is informative | ❌ Median **0.00 s**: 213 of 320 agent-events (67%) were already in cover, because their slot stayed valid for the new threat. Over the 88 that moved, the median was 0.83 s and the p95 2.95 s (median walk 2.3 m). **Fix:** the summary gives the share already in cover and the time to cover of the agents that moved (`05` C5) |
+
+Other numbers from S2-a (scripted, N = 32; for orientation only, not a benchmark result): `GameThreadTime` median 1.61 ms; `FrameTime` median 2.98 ms (GPU, 1280 × 720); 0.32 switches per agent per event; in cover 89% of agent-frames; 94% of agent-events in cover before the next event. The fixed step makes the game run faster than real time: 60 s of game time took about 11 s of wall time.
+
+**S2-b, the checks** (with RVO avoidance and the new report fields):
+
+| # | Check | Result |
+|---|---|---|
+| S2-b1 | Captures complete, columns present | ✅ 3,600 frames each, finalised; 10 × `SQBench/Threat` per capture; the same columns as S2-a2 |
+| S2-b2 | The oracle: 0 conflicts | ✅ 0 onsets, 0 conflict agent-frames in both runs |
+| S2-b3 | The oracle: time to cover ≈ distance ÷ speed | ✅ Walk ratio median **1.14** (p95 3.06), up from 1.00 without avoidance: steering around other agents adds detours, the same for every configuration |
+| S2-b4 | **Every agent reaches cover** | ✅ **Stuck at end: 0** (largest final distance to a slot 50 cm, the acceptance radius); 2 move retries; **98.8%** of agent-events in cover before the next event (S2-a: 94.1%). The 4 remaining misses are single long walks in a 6 s window, not stuck agents |
+| S2-b5 | The time-to-cover figures | ✅ Already in cover 67.5%; agents that moved: median **1.06 s**, p95 3.11 s; in cover 91.6% of agent-frames |
+| S2-b6 | **Repeatability** | ✅ Both runs: arena hash `0x1FFC2AF6`, start-position hash `0x0BC51486`, and every decision metric identical (the oracle has no randomness and the step is fixed). Cost figures vary slightly between the runs, as they must: `GameThreadTime` median 1.513 / 1.548 ms, `FrameTime` median 2.953 / 2.995 ms |
+| S2-b7 | Affinity recorded, pinned launch | ✅ `cpu_affinity: 0xFFFF (performance cores only; hybrid CPU)`; the script pinned itself before recording the environment and launched `SquadQuery.exe` directly |
+
+**Observations from S2:**
+1. **The fixed step runs faster than real time:** 60 s of game time in about 11 s of wall time at N = 32 with the scripted oracle. Wall time per run will grow with the cost of the configuration, not with the capture length.
+2. **Every capture has two PSO events and one garbage collection**, at the same places in every run. They are frame-time spikes outside AI time and the same for every configuration; the summary counts PSO events.
+3. **`EnvQueryManager` costs about 0.4 µs per frame with no query**: the manager's own tick, present in every configuration.
+4. **What S3 inherits:** the `SquadQueryDecide` / `EnvQueryManager` nesting check (S2 has no queries), and the scripted oracle's numbers as the reference for decision delay (walk ratio 1.14, moved time to cover 1.06 s at N = 32).
+
+### S2 audit trail (before the build)
+
+The review and the simplify pass ran **before** the first S2 build, so the job below built the final code.
+
+**1. `code-review` (medium) on the S2 diff** (agents, brain, director, `Build.cs`, `DefaultEngine.ini`, both scripts). Seven findings:
+
+| # | Finding | Decision |
+|---|---|---|
+| R1 | The spawn height came from `GetSimpleCollisionHalfHeight()` on the class default object, which returns 0 there: every agent would have spawned 86 cm into the floor (`Character.cpp:234-239`) | **Fixed:** `GetDefaultHalfHeight()` (`05` C4; `07` S2) |
+| R2 | AI time left out path finding: the engine's `FindPath` opens its own exclusive CSV scope inside `SquadQueryDecide` (`RecastNavMesh.cpp:3839`), so the cost of the path query every switch starts was subtracted and never added back | **Fixed:** AI = `EnvQueryManager` + `SquadQueryDecide` + `Pathfinding` (`05` C5; `01` §6.3 and `02` §9 updated) |
+| R3 | An agent whose move failed or ended blocked never moved again while its slot stayed valid | **Fixed**, then fixed again by the simplify pass (below, A1) |
+| R4 | Oscillations were not detected across a stop (A → none → A) | **Fixed:** stops are transparent (`05` C3) |
+| R5 | A conflict already running at `BenchStart` was never counted as an onset | **Fixed:** the per-slot conflict state is reset at `BenchStart` |
+| R6 | Any event interval > 0 was accepted, though at most one event fires per frame | **Fixed:** at least 1 s |
+| R7 | A `--label` with spaces broke the run tag | **Fixed:** letters, digits, `_` and `-` only |
+
+**2. `simplify` on the reviewed diff** (four reviewers: reuse, simplification, efficiency, altitude). Applied:
+
+| # | Angle | Change |
+|---|---|---|
+| A1 | Altitude | The R3 fix re-issued a lost move only when a chooser picked the same slot again, so the retry rate depended on the configuration (every 0.5 s for the polled baselines, never for the event-driven ones). Moves are now retried from the path-following component's `OnRequestFinished` event, identically in every configuration (`05` C3) |
+| A2 | Altitude | `ASQGameMode` (no player pawn) replaces two workarounds: destroying the template map's default pawn in the director, and re-applying the camera every frame. The camera is now set once with `bAutoManageActiveCameraTarget = false` (`05` C2b, C4) |
+| A3 | Altitude | The summary's definition of AI time is generated from `AI_COLUMN`; it had already drifted once |
+| A4 | Reuse | One "valid cover" rule, `USQArenaSubsystem::IsValidCover`, and one 8 m constant on the arena class, used by the self-check and the director (and the S3 queries) |
+| A5 | Reuse | The director reads the seed from the arena instead of parsing `-SQSeed=` a second time |
+| A6 | Simplification | One `FSQBrainCounters` struct with `operator-` replaces four parallel `…AtStart` fields; one `FArrival` array replaces two parallel arrays; the wait's start time is the event's own time; agent-frames are computed, not counted; a captured-event counter replaces two `FilterByPredicate(…).Num()` copies; the exit latch uses the frame counter; unused `AgentIndex` and `GetCurrentThreatIndex` removed |
+| A7 | Simplification | `run_bench.py` uses `csv_stats.DEFAULT_COLUMNS` instead of a second column list |
+| A8 | Efficiency | The brain caches its controller; the director reserves its event array. Nothing else was on a hot path |
+
+Not applied, with the reason: the threat-mode string compare (S3 replaces it with an enum, `ESQBrainMode`); the O(agents × slots) scan in the scripted oracle (it is a test oracle, not a measured configuration); the O(slots) conflict scan per frame (about 1 µs, the same in every configuration); hoisting the events-column lookup and removing `--skip` in `csv_stats.py` (between runs only; kept identical to UE5-UpdateBudget's tested script).
+
+**3. Changes after the first run, self-reviewed** (the S2-a findings; small enough that a second skill pass would review three lines):
+- *Correctness:* `bUseRVOAvoidance` is a public flag set in the constructor, read by character movement when it registers; the final slot distance uses the same `Dist2D` as the metrics; the new script metrics are pure functions of the two reports, and "already in cover" (0 s) and "moved" (> 0 s) split the reached samples exactly. S2-b exercised all three.
+- *Reuse:* `IN_COVER_RADIUS_CM = 75` in `run_bench.py` mirrors `USQBenchmarkSubsystem::InCoverRadiusCm`. A cross-language copy, kept with a comment pointing at the C++ constant; the walking speed already travels in the report header, and the radius can join it if it ever changes.
+- *Simplification, efficiency, altitude:* nothing to change; avoidance is the engine's own mechanism for the problem, applied once in the agent class rather than as retries in the brain.
+
+---
+
 ## Phases 5–8 (to be written)
 
-- S2: harness and metric checks; S3: the baseline capture; S4: solver tests; S5: SQ checks; S7: the headline matrix and SC1–SC7.
+- S3: the baseline capture; S4: solver tests; S5: SQ checks; S7: the headline matrix and SC1–SC7.

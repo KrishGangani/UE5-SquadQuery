@@ -88,18 +88,19 @@ D:\UNREAL PORTFOLIO\P07_SquadQuery\Tools\                    ← build/package/s
 
 **Telemetry:** a CSV category `SquadQuery` with per-frame counts (`Evaluations`, `QueriesStarted`, `QueriesFinished`, `ItemTests`, `Assignments`, `Switches`, `ClaimFailures`, `SolveUs`) and **one exclusive timing stat, `SquadQueryDecide`**, wrapped around every piece of decision code (§9). Counters are plain fields published once per frame, because a CSV stat call per event would itself cost time (UE5-UpdateBudget measured about 50 ns per `CSV_CUSTOM_STAT`).
 
-### 4.2 Game module `SquadQuery` (8 pieces)
+### 4.2 Game module `SquadQuery` (9 pieces)
 
 | Class | Base | Responsibility |
 |---|---|---|
 | `USQArenaSubsystem` | `UWorldSubsystem` (Game/PIE) | In `OnWorldBeginPlay`, from the seed: the floor (an `AStaticMeshActor`), 100 cover blocks, one runtime `USmartObjectDefinition` with 6 slots, the navigation bounds volume (box body set from code, `01b` #9), and the 10 threat positions. It then waits for the navigation system's build-finished event; **ready** = a build has finished, nothing else is queued, and a corner-to-corner path is complete (changed in S1: "not in progress" alone is true before any build has been queued, and the event alone also fires for a near-empty build, `01b` #20). A one-shot timer fails the arena after 60 s of real time. When ready it fills the slot handles, traces the **visibility table** (threat position × slot → hidden?) once, before agents exist, and broadcasts `OnArenaReady`. `-SQArenaCheck` runs the S1 self-check and quits with exit code 0 or 1 |
 | `ASQCoverBlock` | `AActor` | An unscaled root, a cube mesh scaled on its own component to 3.0 × 1.0 × 1.3 m (`BlockAll`), and a `USmartObjectComponent`. The root stays unscaled because slot offsets are relative to the actor (S1). Spawned deferred so the definition is set before `BeginPlay` registers it (`01b` #11) |
 | `USQCoverBehaviorDefinition` | `USmartObjectBehaviorDefinition` | *Added in S1.* An empty behavior type for cover slots. A Smart Object definition is valid only if every slot has a behavior definition (`01b` #19); without it no block would register |
-| `ASQAgent` | `ACharacter` | Capsule, character movement (450 cm/s), a cylinder mesh for visibility, a `USquadMemberComponent` and a `USQAgentBrainComponent`. Possessed by a plain `AAIController` |
+| `ASQAgent` | `ACharacter` | Capsule, character movement (450 cm/s, RVO avoidance since S2), a cylinder mesh for visibility, a `USquadMemberComponent` and a `USQAgentBrainComponent`. Possessed by a plain `AAIController` |
 | `USQAgentBrainComponent` | `UActorComponent` | The decision logic in four modes (§9): **B0** polled per-agent query; **B1** + claims; **B2** event-driven + claims; **SQ** follows `OnAssignmentChanged`. Every mode ends in the same "set target" function, which owns the switch counter, the claim and `MoveToLocation` |
 | `USQCoverSlotGenerator` | `UEnvQueryGenerator_SmartObjects` | Sets the engine generator's protected settings (origin context, box half-extent, `bOnlyClaimable`) from code (`01b` #17). Every query in every configuration uses it, so the item source is identical |
 | `SQQueries` | free functions (`SQQueries.h/.cpp`) | Build the two `UEnvQuery` templates in C++ (§7). *Rejected:* assets, which would be binary, unreviewable in a diff, and easy to drift between configurations |
-| `USQBenchmarkSubsystem` | `UTickableWorldSubsystem` (Game/PIE) | The director: reads `-SQ…=` values; spawns squads from the seed once navigation is ready; runs the threat timeline; fires `BenchStart`/`BenchEnd`; writes CSV metadata; measures conflicts, switches, oscillations, time-to-cover and exposure from the visibility table (no traces); writes the per-agent and per-event run report |
+| `USQBenchmarkSubsystem` | `UTickableWorldSubsystem` (Game/PIE) | The director: reads `-SQ…=` values; spawns squads from the seed once navigation is ready; runs the threat timeline; fires `BenchStart`/`BenchEnd`; writes CSV metadata; measures conflicts, switches, oscillations, time-to-cover (with the distance walked) and exposure from the visibility table (no traces); writes the per-agent and per-event run report |
+| `ASQGameMode` | `AGameModeBase` | *Added in S2.* The default game mode with no player pawn, so the template map's `PlayerStart` puts no colliding `ADefaultPawn` among the agents and the director's camera stays the view target (`05` C2b) |
 
 ## 5. Overview diagram
 
@@ -248,7 +249,7 @@ The workload must be identical across B0–B2 and SQ, so **every configuration e
 | B2 | The same | After a threat event; after a failed claim | Smart Object claim |
 | SQ | The squad's shared query + solver | After a squad event (≤ 4 squads started per frame) | Smart Object claims made by the subsystem |
 
-**Measuring at equal cost.** The exclusive stat `SquadQueryDecide` wraps the brain's poll and result handling, the subsystem's tick and result handling, the solver, every claim and every `MoveToLocation`, in all modes. Metrics (conflicts, switches, time-to-cover) are computed by the director from per-agent fields and the precomputed visibility table, in its own CSV scope `SQBench`, which is **excluded** from AI time and identical in every mode.
+**Measuring at equal cost.** The exclusive stat `SquadQueryDecide` wraps the brain's poll and result handling, the subsystem's tick and result handling, the solver, every claim and every `MoveToLocation`, in all modes. The engine's path query inside `MoveToLocation` records into its own exclusive `Pathfinding` stat, so **AI time = `EnvQueryManager` + `SquadQueryDecide` + `Pathfinding`**, summed per frame (S2; `05` C5). A move that path following ends short of its slot is retried from the engine's finished-move event, the same way in every mode (`05` C3). Metrics (conflicts, switches, time-to-cover) are computed by the director from per-agent fields and the precomputed visibility table, in its own CSV scope `SQBench`, which is **excluded** from AI time and identical in every mode.
 
 ## 10. C++ vs Blueprint
 
@@ -294,4 +295,9 @@ The workload must be identical across B0–B2 and SQ, so **every configuration e
 | **S1:** `USQCoverBehaviorDefinition` added; the block's root stays unscaled; navigation readiness also requires a complete corner-to-corner path; the floor is an `AStaticMeshActor`; `-SQArenaCheck` self-check | Smart Object validation (`01b` #19); slot offsets are relative to the actor; "no build in progress" is true before a build is queued; the floor needs no class of its own; the cooked-build proof of `03` S1 |
 | **S1:** the shared query's request filter must include claimed slots | The filter excludes them by default (`01b` #18) |
 | **S1:** readiness waits for the navigation system's build-finished event (plus the path test) instead of polling; the bounds volume calls `UpdateBounds()` after it gets its box | The review found the engine event (`05` B5); the self-check then found that the volume's cached bounds were empty and that the event also fires for a near-empty build (`01b` #20, `09` S1-c) |
+| **S2:** AI time also includes the engine's `Pathfinding` exclusive stat | `MoveToLocation`'s path query opens its own exclusive scope inside ours; without it, configurations that switch often would look cheaper (`05` C5, `07` S2) |
+| **S2:** a ninth game-module piece, `ASQGameMode` (no player pawn) | The template map's `PlayerStart` would otherwise put a colliding default pawn among the agents (`05` C2b) |
+| **S2:** one "valid cover" rule, `USQArenaSubsystem::IsValidCover`, and one 8 m constant | The self-check, the metrics and (from S3) the queries must agree on what counts as cover (`05` B4) |
+| **S2:** agents use RVO avoidance | Path following plans around blocks, not agents; without avoidance 6% of agent-events ended short of cover with agents pushed against each other (`09` S2-a) |
+| **S2:** lost moves are retried from `OnRequestFinished` | A retry that waited for the next decision would depend on how often each configuration decides (`05` C3) |
 | **S1:** the game module also depends on `GameplayTags` directly | It constructs Smart Object request filters and slot definitions, which contain tag containers; the link failed without it (`09` S1-b) |

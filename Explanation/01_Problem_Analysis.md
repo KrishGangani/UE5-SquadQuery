@@ -94,7 +94,7 @@ All four use the **same generator, the same tests, the same thresholds, the same
 
 | Metric | Unit | How it is measured |
 |---|---|---|
-| **AI time per frame**: mean, p95, p99 | ms | `Exclusive/GameThread/EnvQueryManager` (engine CSV column) **+** our exclusive CSV stat around all decision code (polling, result handling, assignment, claims, `MoveToLocation`) |
+| **AI time per frame**: mean, p95, p99 | ms | `Exclusive/GameThread/EnvQueryManager` (engine CSV column) **+** our exclusive CSV stat around all decision code (polling, result handling, assignment, claims, `MoveToLocation`) **+** `Exclusive/GameThread/Pathfinding`, the engine's own exclusive scope around the path query each `MoveToLocation` runs (*added in S2*: it nests inside ours and would otherwise be subtracted, `02` §13) |
 | AI time on event frames vs other frames | ms | The same, split by the director's event frames |
 | Frame time and `GameThreadTime`: median, p95, p99 | ms | CSV profiler |
 | **Item tests per second**; traces per second; queries per second | count/s | Sum of `NumProcessedItems` over each finished query's steps (EQS debug data; Development builds only, `01b` #6) |

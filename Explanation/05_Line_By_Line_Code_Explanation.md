@@ -6,7 +6,8 @@
 |---|---|---|
 | A | Phase 4, F1–F3 (foundation) | `.uproject`, two `Target.cs`, two `Build.cs`, two module `.cpp`, `.uplugin`, three config `.ini`, `Tools\*.bat` |
 | B | S1 (arena and navigation) | `SQCoverBlock.h/.cpp`, `SQArenaSubsystem.h/.cpp`, the changed `SquadQuery.Build.cs` |
-| C | S2 onwards | written with the code |
+| C | S2 (agents, director, scripts) | `SQAgent.h/.cpp`, `SQAgentBrainComponent.h/.cpp` (S2 version), `SQBenchmarkSubsystem.h/.cpp`, the changed `SquadQuery.Build.cs` and `DefaultEngine.ini`, `Tools\csv_stats.py`, `Tools\run_bench.py` |
+| D | S3 onwards | written with the code |
 
 Engine references are relative to `C:\Program Files\Epic Games\UE_5.8\Engine\`, version 5.8.4.
 
@@ -336,7 +337,8 @@ private:
 | `FSimpleMulticastDelegate OnArenaReady;` | A native multicast delegate without parameters: any number of listeners can bind. Native rather than dynamic, because no Blueprint listens and native delegates are cheaper (`06` §10) |
 | `GetSlots()`, `GetThreatPositions()` | Read-only access to the shared tables (`const&`: no copy) |
 | `bool IsSlotHidden(int32 ThreatIndex, int32 SlotIndex) const` | One lookup in the precomputed table: **the metrics never trace during a measured run** (`02` §4.2). Inline in the header because it runs for every agent every frame. It returns false before the arena is ready or for an index out of range, instead of asserting (*added in review*, `09` S1 audit): three cheap comparisons, so a caller that asks too early gets "not hidden", not a crash |
-| `GetSeed()`, `GetArenaHash()` | The seed used, and a CRC of the layout, so two runs can prove they built the same arena |
+| `bool IsValidCover(int32 ThreatIndex, int32 SlotIndex) const` | *Added in S2's review:* hidden (`IsSlotHidden`) and at least `MinThreatDistanceCm` from the threat position. The one definition of "valid cover" for the self-check and every metric |
+| `GetSeed()`, `GetArenaHash()` | The seed used, and a CRC of the layout, so two runs can prove they built the same arena. The director reads the seed from here |
 | `static constexpr` layout constants | The numbers of `01` §6.1 in one place: 10 × 10 blocks 12 m apart with ±3 m jitter, a 130 m floor, slots 60 cm from the face and ±80 cm along the long sides, 10 threat positions, eye height 170 cm, probe height 90 cm (`02` §7) |
 | `DoesSupportWorldType(...) const override` (protected) | Game and PIE worlds only. World subsystems also exist in editor worlds (UE5-UpdateBudget `01b` #2), where spawning an arena into the level being edited would be a bug |
 | The private helpers | One function per job, in the order they run; each is explained with the `.cpp`. `HandleNavigationGenerationFinished(ANavigationData*)` is a `UFUNCTION()` because it is bound to a **dynamic** delegate, which finds its target by name through reflection (`06` §10). `class ANavigationData;` is a forward declaration: the header only names the type |
@@ -363,7 +365,7 @@ private:
 | `CornerCm = GridHalfExtentCm + GridJitterCm + ShortSideX + 290.f` (6200) and its `static_assert` | The path-check corners lie beyond every block and slot (block centre + jitter + the farthest slot, plus a 2.9 m margin), and the `static_assert` proves at compile time that they stay on the 65 m half-floor. *Corrected before the first run:* a first draft used 58 m, where a jittered edge block could cover a corner and fail the check for the wrong reason; the value is now derived, so a layout change can't reintroduce that |
 | `NavBoundsHeightCm = 1000.f` | The bounds box spans 5 m below and above the floor |
 | `ThreatClearanceCm = 260.f` | A threat never stands inside or against a block (half-length 150 cm plus a margin) |
-| `MinThreatDistanceCm = 800.f`, `MinHiddenSlotsPerThreat = 256` | The cover query's distance filter (`02` §7) and the S1 pass threshold: at least 2 × 128 usable hidden slots from every threat position (`03`, S1) |
+| `MinHiddenSlotsPerThreat = 256` | The S1 pass threshold: at least 2 × 128 usable hidden slots from every threat position (`03`, S1). The 8 m distance itself moved to the class as `USQArenaSubsystem::MinThreatDistanceCm` in S2, next to the eye and probe heights, so the arena, the director and the queries share one constant |
 | `bool IsPathComplete(const UNavigationSystemV1&, From, To)` | One synchronous path **test**: `TestPathSync(FPathFindingQuery(nullptr, *NavData, From, To))` (`NS/Public/NavigationSystem.h:679`). It builds no `UNavigationPath` object for the garbage collector, and a partial path counts as a failure (`NS/Private/NavMesh/PImplRecastNavMesh.cpp:310-314`; `RecastNavMesh.cpp:3920-3921`). The query takes the navmesh's default filter when none is given (`NS/Private/NavigationData.cpp:53-56`). *Changed in review:* the first version called `FindPathToLocationSynchronously` and read `IsValid() && !IsPartial()` from the path object |
 | `bool SpansArena(const UNavigationSystemV1&)` | The readiness test: `IsPathComplete` along the diagonal, from corner to opposite corner. Used by the build-finished handler and by the timeout's diagnostic line |
 | `void RequestSelfCheckExit(bool bPass)` | The self-check's verdict as the exit code, in one place: a normal exit on PASS (code 0); a **forced** exit with code 1 on FAIL, because only the forced path terminates the process with that code, while the normal path posts a quit message (`Core/Private/Windows/WindowsPlatformMisc.cpp:1493-1520`; the exception cvar it checks is off by default, `:140-144`). Used by the timeout and by `FinishArena` |
@@ -471,3 +473,154 @@ private:
 | Paths cross the arena | `IsPathComplete` on both diagonals and two edges, from one table of corner pairs | 4 of 4 |
 | Enough cover for 128 agents from every threat position | Per threat: hidden slots, and hidden slots at least 8 m from the threat | the smallest "hidden and ≥ 8 m" count ≥ 256 |
 | Layout | `Slots.Num()`, `ThreatPositions.Num()` | 600 and 10 |
+
+---
+
+## Part C · S2: agents, the benchmark director and the measurement scripts
+
+S2 adds everything a run needs **except a real decision method**: agents that walk, a director that runs the threat timeline and measures decision quality, and the scripts that launch, pin and summarise runs. Decisions come from a scripted test oracle, so the metrics can be checked against a case whose answer is known (`03`, S2).
+
+### C1. `SquadQuery.Build.cs` (changed in S2)
+
+| Line | What changed, and why |
+|---|---|
+| `PublicDependencyModuleNames … "AIModule"` | `SQAgent.cpp` uses `AAIController`, the brain calls `MoveToLocation` and listens to path following, and `SQAgentBrainComponent.h` stores an `FAIRequestID` (`AIModule/Classes/AITypes.h`). A public header that needs a module's types makes that module a **public** dependency (`06` §2) |
+| `NavigationSystem` comment | The director now projects spawn points onto the navmesh too; still only in `.cpp` files, so still private |
+
+### C1b. `Config\DefaultEngine.ini` (changed in S2)
+
+| Line | What changed, and why |
+|---|---|
+| `[/Script/NavigationSystem.NavigationSystemV1] CrowdManagerClass=` | No Detour crowd manager. The navigation system creates one from this class (default set in `NS/Private/NavigationSystem.cpp:931`), and an empty class creates none (`:1570-1579`). Our agents use the AI controller's ordinary path following, not crowd following, so nothing needs it; with it, every run that built a navmesh logged `LogCrowdFollowing: Warning: Unable to find RecastNavMesh instance while trying to create UCrowdManager instance` (`AIModule/Private/Navigation/CrowdManager.cpp:905`) at world teardown (`09` S1, observation 2). UE5-NavReadyPCG made the same change for the same warning |
+| `[/Script/EngineSettings.GameMapsSettings] GlobalDefaultGameMode=/Script/SquadQuery.SQGameMode` | Our game mode (C2b) instead of `AGameModeBase`. The template map sets no game mode of its own, so the global one applies; the log line `LogLoad: Game class is 'SQGameMode'` confirms it (`09` S2) |
+
+### C2. `Public\SQAgent.h` / `Private\SQAgent.cpp`
+
+| Line | What it does, and why |
+|---|---|
+| `UCLASS() class ASQAgent : public ACharacter` | The agent of every configuration. A character, because character movement plus an AI controller following navmesh paths is the standard Unreal setup the baselines would use (`02` §4.2). The same class in every configuration, so movement cost is identical and only decisions differ |
+| `GetBrain() const` | The director and the metrics read the brain |
+| `static constexpr float WalkSpeedCmPerSecond = 450.f;` | A jog. Time-to-cover depends on it, so it is one constant for every configuration (`01` §6.1) |
+| `UPROPERTY(VisibleAnywhere) TObjectPtr<UStaticMeshComponent> Body;` and `Brain` | The visible cylinder and the decision component, both GC-visible |
+| `PrimaryActorTick.bCanEverTick = false;` | The actor's own tick does nothing; movement ticks in its component, decisions in the brain. One fewer tick function per agent |
+| `AIControllerClass = AAIController::StaticClass(); AutoPossessAI = EAutoPossessAI::Spawned;` | Every spawned agent gets a plain engine AI controller. Path following comes from it; decisions don't, so the controller is identical in every configuration |
+| `Movement->MaxWalkSpeed = WalkSpeedCmPerSecond; Movement->bOrientRotationToMovement = true; bUseControllerRotationYaw = false;` | Walk at the fixed speed and face where you walk, the usual AI character setup |
+| `Movement->bUseRVOAvoidance = true;` | **Added after the first S2 run** (`09` S2-a). Path following plans around blocks, not around other agents. Without avoidance, an agent whose path ran through a squadmate already standing in a neighbouring slot pushed into it until path following declared the move blocked; 19 of 320 agent-events (6%) ended short of cover, every one with its capsule touching another agent's. RVO avoidance (`Engine/Classes/GameFramework/CharacterMovementComponent.h:1065`) steers each agent's velocity around nearby agents. It is the engine's standard answer for characters, and it costs the same in every configuration. With it (S2-b): no agent stuck at the end, 98.8% of agent-events in cover before the next event, and a walk ratio of 1.14 instead of 1.00 (steering around others adds detours) |
+| `static ConstructorHelpers::FObjectFinder<UStaticMesh> CylinderMesh(…)` | The engine cylinder, found once per class (`05` B3) |
+| `Body->SetRelativeScale3D(FVector(2 * Radius, 2 * Radius, 2 * HalfHeight) / 100.f);` | Sizes the 100 cm cylinder to the default capsule (radius 34, half-height 88), read from the capsule so the two can't disagree |
+| `Body->SetCollisionProfileName(NoCollision); Body->SetCanEverAffectNavigation(false);` | Only the capsule collides; the visual body is neither physics nor navigation geometry |
+| (inherited) the capsule | The engine sets it up so agents change neither the visibility answer nor the navmesh: the `Pawn` profile ignores the `Visibility` channel (`BaseEngine.ini:3110`), and a character's capsule never affects navigation (`Character.cpp:83`). So the visibility table the arena traces **before** agents exist (`05` B5) stays the answer the EQS trace test gives **while** they move, and 128 moving capsules don't trigger navmesh rebuilds |
+
+### C2b. `Public\SQGameMode.h` / `Private\SQGameMode.cpp`
+
+| Line | What it does, and why |
+|---|---|
+| `UCLASS() class ASQGameMode : public AGameModeBase` | The engine's default game mode with one change. *Added in review:* the first version let `AGameModeBase` spawn its `ADefaultPawn` at the template map's `PlayerStart` and had the director destroy it, and re-applied the camera every frame in case something possessed later. Removing the pawn at its source makes both workarounds unnecessary |
+| `DefaultPawnClass = nullptr;` (constructor) | `DefaultPawnClass` is a plain class property, not a config one (`Engine/Classes/GameFramework/GameModeBase.h:106-108`), hence a subclass. With no class the engine skips the spawn (`Engine/Private/GameModeBase.cpp:1292-1305`) and the controller just goes inactive (`Controller.cpp:115-118`; `PlayerController.cpp:354-359`), without logging anything |
+
+### C3. `Public\SQAgentBrainComponent.h` / `Private\SQAgentBrainComponent.cpp` (S2 version)
+
+| Line | What it does, and why |
+|---|---|
+| `struct FSQBrainCounters` (switches, oscillations, move requests, retries, failures) with `operator-` | Everything one brain counts, as plain numbers. The director copies it at `BenchStart` and subtracts the copy at the end: one snapshot and one subtraction, however many counters later steps add (*review:* the first version kept a separate `…AtStart` field per counter) |
+| `void Setup(int32 InSquadIndex)` | The squad, for the run report, set once before the agent finishes spawning |
+| `void SetTarget(int32 SlotIndex)` | **The one place a decision becomes movement** (`02` §9): every configuration ends here |
+| `static constexpr double OscillationWindowSeconds = 3.0;` | Taking again, within 3 s, the slot held before the current one counts as an oscillation (`01` §6.3) |
+| `static constexpr float AcceptanceRadiusCm = 50.f;` | How close `MoveToLocation` must get. The "in cover" test allows 75 cm (`02` §7) |
+| `UPROPERTY(Transient) TObjectPtr<USQArenaSubsystem> Arena;` and `Controller` | Cached: the slot table is needed on every decision, and the controller on every move (`ResolveController`) |
+| `FAIRequestID CurrentMoveId;` | The path-following request this brain is waiting for, so a finished-move notification can be matched to it |
+| `TargetSlot`, `PreviousSlot`, `PreviousSlotLeftTime` | The current decision, and the slot held before it, for oscillation detection |
+| `PrimaryComponentTick.bCanEverTick = false;` (S2) | In S2 decisions arrive from outside. The polled baselines (S3) turn ticking on |
+| `ResolveController()` | The pawn's `AAIController`, cast once and cached (`AutoPossessAI = Spawned` possesses during the spawn, before `BeginPlay`; resolved lazily as well, in case a decision arrives first). On first use it subscribes to the path-following component's `OnRequestFinished` (`AIModule/Classes/Navigation/PathFollowingComponent.h:229`) |
+| `CSV_SCOPED_TIMING_STAT_EXCLUSIVE(SquadQueryDecide);` | The project's AI-time stat (`01` §6.3). **Exclusive**: time spent inside a nested exclusive scope is subtracted. So when this code runs inside the EQS tick (S3) it is counted here and not in `EnvQueryManager` (`01b` #5); and the engine's path query inside `MoveToLocation` opens its own exclusive `Pathfinding` scope (`NS/Private/NavMesh/RecastNavMesh.cpp:3839`), which is why AI time adds that column back (C5) |
+| `if (SlotIndex == TargetSlot) return;` | The same decision again costs nothing and isn't a switch |
+| `if (SlotIndex != INDEX_NONE && SlotIndex == PreviousSlot && Now - PreviousSlotLeftTime <= OscillationWindowSeconds) ++Oscillations;` | Checked on every change, before the bookkeeping. Stops are transparent: A → none → A and A → none → B → A both count (*review:* the first version skipped the check after a stop) |
+| `if (TargetSlot != INDEX_NONE) { ++Switches; PreviousSlot = TargetSlot; … }` | A switch is leaving a slot. Going from no slot to a slot (the first decision, or after a stop) is not a switch |
+| `StopMovement()` for `INDEX_NONE` | No slot: stand still, and forget the request id |
+| `RequestMove`: `MoveToLocation(Slot.Location, 50, false, true, true, false)` | Walk to the slot: acceptance 50 cm, don't stop on overlap, use pathfinding, project the destination onto the navmesh, don't strafe. **Every call runs a synchronous path query** (`01b` #15), which is why switches cost CPU. It counts the request, counts a `Failed` result, and keeps the request id when the request was accepted (`AAIController::GetCurrentMoveRequestID`) |
+| `OnMoveFinished(RequestID, Result)` | Path following reports a finished request. Only our current request, and only when it ended **short of the slot** (blocked by another capsule, off its path, invalid path) matters; success and interruptions (`IsInterrupted()`: a newer request or `StopMovement`) don't. The retry waits for the next frame, outside path following's own callback |
+| `RetryMove()` | Issues the move again, inside `SquadQueryDecide`, counted as a retry. *Changed in review:* a first fix re-issued the move only when a chooser happened to pick the same slot again, so the retry rate depended on the configuration (every 0.5 s for the polled baselines, never for the event-driven ones). Driving it from the engine's finished-move event makes it identical in every configuration. Path following detects "blocked" itself (less than 10 cm progress over its sampling window, `AIModule/Private/Navigation/PathFollowingComponent.cpp:138-144`), so retries come seconds apart, not every frame |
+
+### C4. `Public\SQBenchmarkSubsystem.h` / `Private\SQBenchmarkSubsystem.cpp`
+
+**Header**
+
+| Line | What it does, and why |
+|---|---|
+| `UCLASS() class USQBenchmarkSubsystem : public UTickableWorldSubsystem` | The director. A tickable world subsystem: the timeline and the metrics run every frame (UE5-UpdateBudget's pattern) |
+| `GetCurrentThreatIndex()` | The current threat position (index into the arena's list) |
+| `InCoverRadiusCm = 75.f`, `SquadSize = 8`, `EventOffsetSeconds = 0.25` | "In cover" radius, squad size (`01` §6.1), and the offset that keeps the first captured event off the `BenchStart` frame |
+| `struct FRunSettings` | Every `-SQ…=` option with its default |
+| `enum class ERunPhase { Idle, WaitingForArena, WarmUp, Capture, Done }` | The run's states, in order |
+| `struct FAgentMetrics` | Per agent: the event it is still getting into cover for, where it stood when that event fired, and its brain's `FSQBrainCounters` at `BenchStart`. The event's own `Time` is the start of the wait, so no separate timestamp is kept (*review*) |
+| `struct FArrival { float Seconds = -1.f; float DistanceCm = -1.f; }` | How one agent answered one event. One array of these per event instead of two parallel arrays (*review*) |
+| `struct FEventRecord` | One threat event: which position, when, whether it was captured, and every agent's `FArrival` (both `-1` = not in cover before the window closed). Distance ÷ walking speed is the fastest possible time, so the two together separate "decided late or walked around blocks" from "had far to go" |
+| `UPROPERTY(Transient)` on `Arena`, `Agents`, `Camera`, `ThreatMarker` | GC-visible references to everything the director spawned or uses |
+| `TArray<uint8> SlotTargetCounts; TBitArray<> SlotInConflict;` | Per slot: how many agents target it this frame, and whether it was in conflict last frame (to count onsets) |
+| Capture totals (`CapturedEvents`, `CapturedFrames`, `ConflictOnsets`, `ConflictAgentFrames`, `InCoverAgentFrames`) | Summed only during the capture. Agent-frames are `CapturedFrames × Agents.Num()`, computed where needed rather than counted (*review*) |
+
+**`ReadRunSettings` / `ValidateRunSettings`**: parse `-SQMode=`, `-SQAgents=`, `-SQWarmup=`, `-SQCapture=`, `-SQEventInterval=`, `-SQRunTag=`, `-SQExit`. The seed is not parsed again: the director uses the arena's (`Arena->GetSeed()`), so there is one source for it (*review*). S2 accepts only `Scripted`; an unknown mode, a negative warm-up, a non-positive capture or an event interval under 1 s is an Error and no run starts. At most one event fires per frame, so a shorter interval would drift behind the timeline (*review*)
+
+**`OnWorldBeginPlay` / `HandleArenaReady`**: with no agents requested, nothing happens. Otherwise wait for the arena: start at once if it is ready, else bind to `OnArenaReady` (`06` §10). Agents can only spawn on a navmesh, so the run can't start earlier.
+
+**`StartRun`**
+
+| Line | What it does, and why |
+|---|---|
+| `SpawnSquads(World); AgentMetrics.SetNum(…); SlotTargetCounts.SetNumZeroed(…); SlotInConflict.Init(false, …);` | Spawn, then size the per-agent and per-slot state once |
+| `World.SpawnActor<ACameraActor>(FVector(0, 0, 10000), FRotator(-90, 0, 0))` | A top-down camera 100 m up: with the default 90° field of view it sees the whole 130 m floor. The same view in every configuration, so rendering cost is the same |
+| `PlayerController->bAutoManageActiveCameraTarget = false; PlayerController->SetViewTarget(Camera);` | Set once. The player has no pawn (C2b), and with auto-management off (`Engine/Classes/GameFramework/PlayerController.h:299`) nothing resets the view target, so no per-frame re-check is needed (*review*) |
+| `Events.Reserve(…)` | Room for every event of the run, allocated once |
+| The threat marker (`AStaticMeshActor`, sphere, `Movable`, `NoCollision`, no navigation) | Only for the viewer. Movable because it relocates; no collision, so it never blocks a trace or a path |
+| `NextEventTime = StartTime + FirstCapturedEvent - floor(FirstCapturedEvent / Interval) * Interval;` | Events are anchored on the **captured** ones (`BenchStart` + 0.25 s + k × 6 s); stepping back whole intervals gives the warm-up events. With the defaults: 4.25 s (warm-up), then 10.25 s, 16.25 s, … |
+| `CSV_METADATA(TEXT("SQRunTag"), …)` and the others | The run's description inside the CSV itself, so every capture is self-describing (UE5-UpdateBudget's convention) |
+
+**`SpawnSquads`**
+
+| Line | What it does, and why |
+|---|---|
+| `FRandomStream Stream(Arena->GetSeed() + 1000);` | Its own stream: the arena depends only on the seed, and the agents don't change it |
+| `GetDefault<ASQAgent>()->GetDefaultHalfHeight() + 2.f` | Spawn height from the class default's capsule (`Engine/Private/Character.cpp:263-269`), so the capsule rests on the floor. *Corrected in review:* the first version called `GetSimpleCollisionHalfHeight()` on the class default object, which returns 0 there (its capsule never registered) and logs "Called on default object … Consider using GetDefaultHalfHeight()" (`Character.cpp:234-239`): every agent would have spawned 86 cm into the floor |
+| Squad centres: random within ±50 m, at least 14 m apart | Squads start apart, each in its own part of the arena |
+| `ProjectPointToNavigation(Point, OnNavmesh, FVector(10, 10, 200))` for each of the 8 ring points | A ring point must lie on the navmesh within 10 cm horizontally: open floor, not inside or against a block. A centre whose ring doesn't fit is skipped |
+| `SpawnActorDeferred<ASQAgent>(…, AdjustIfPossibleButAlwaysSpawn)` → `Setup(SquadIndex)` → `FinishSpawning` | The squad before `BeginPlay`; the collision handling nudges an agent that would overlap, instead of failing |
+| `Crc = FCrc::TypeCrc32(Point, Crc)` | A start-position hash, logged, so two runs can prove they started identically |
+
+**`Tick`**: at warm-up end, snapshot every brain's counters, clear the per-slot conflict state (so a conflict already running when the capture starts counts as a captured onset, *review*) and fire `CSV_EVENT(SQBench, "BenchStart")`; during warm-up and capture, fire due events and update the metrics; at capture end, fire `BenchEnd` and log a summary; in `Done`, write the report on the first frame and, with `-SQExit`, quit on the third so the CSV profiler finishes its file (UE5-UpdateBudget).
+
+**`FireThreatEvent`**: records the event (threat position = event number modulo 10, captured or not, `-1` for every agent), stores each agent's position, moves the marker, fires `CSV_EVENT(SQBench, "Threat")` so event frames can be found in the CSV (H6), opens a cover window for every agent, and in `Scripted` mode calls `AssignScripted`.
+
+**`IsSlotValidCover` / `IsInCover`**: a slot is valid cover if `USQArenaSubsystem::IsValidCover` says so for the current threat position: hidden in the visibility table and at least 8 m away, the same rule as the cover query's two filters (`02` §7), and the same function the S1 self-check uses (*review:* the director first had its own copy of the rule and of the 8 m constant). An agent is in cover if its target slot is valid cover and it stands within 75 cm of it. **No traces**: one bit lookup and two distances.
+
+**`AssignScripted`** is a **test oracle, not a configuration**. It knows the visibility table, so its decisions cost no queries. Pass 1 keeps every still-valid target; pass 2 gives each other agent, in index order, the nearest free valid slot. With it, the metrics have a known answer: no conflicts by construction, and time-to-cover close to distance ÷ speed.
+
+**`UpdateMetrics`** (inside `CSV_SCOPED_TIMING_STAT(SQBench, Metrics)`, which is not part of AI time)
+
+| Line | What it does, and why |
+|---|---|
+| `FMemory::Memzero(SlotTargetCounts.GetData(), SlotTargetCounts.Num());` | Clear 600 counters (600 bytes) |
+| For each agent: count its target slot; test `IsInCover`; if it is waiting for an event and is now in cover, record `Now - Event.Time` and the distance from its position at the event to that slot | Time to cover is measured from the event frame to the first frame in cover |
+| For each slot: a conflict is 2+ agents; count an **onset** when a slot enters conflict during the capture | One long conflict counts once |
+| `CSV_CUSTOM_STAT(SQBench, InCover/Awaiting/ConflictSlots, …, Set)` | Three per-frame counts in the capture |
+
+**`WriteRunReport`**: two CSV files in `Saved/SQRuns/` (moved into `Benchmarks/Raw/` by the run script), each starting with one `# key=value …` line with the run description (including `walkspeed`, from `ASQAgent::WalkSpeedCmPerSecond`, so the scripts never hard-code it) and the capture totals: `<tag>_agents.csv` (per agent: switches, oscillations, move requests, retries and failures during the capture, final target and position, and the final distance to that slot: above 75 cm the agent never got there) and `<tag>_events.csv` (per captured event and agent: seconds to cover and distance, or `-1`).
+
+### C5. `Tools\csv_stats.py` and `Tools\run_bench.py`
+
+Copied from UE5-UpdateBudget and adapted. What changed, and why:
+
+| Script | Change | Why |
+|---|---|---|
+| `csv_stats.py` | **Composite columns** `NAME=A+B`: the per-frame sum of two columns, an empty cell counting 0 | AI time is the sum of two exclusive stats per frame (`01` §6.3); summing their separate percentiles would be wrong |
+| `csv_stats.py` | `AI_COLUMN = EnvQueryManager + SquadQueryDecide + Pathfinding` (all three exclusive) | *Changed in review:* the engine's path query opens its own exclusive scope inside ours (C3), so without the third part AI time would leave out the path planning every decision starts, and favour configurations that switch often. The column is global, so it would also count repaths the navigation system starts itself; with a static arena there are none |
+| `csv_stats.py` | Default columns: frame and thread times, `AI`, its three parts, `SQBench/InCover`; the `mean` is printed. `run_bench.py` uses the same list (`SUMMARY_COLUMNS = DEFAULT_COLUMNS`) | AI time is bursty (event-driven configurations do nothing on most frames), so the mean (cost per second) matters as much as the percentiles |
+| `csv_stats.py` | The self-test also checks composite columns against hand-worked values | Every statistic stays reproducible |
+| `run_bench.py` | `EXE` = `Build\Windows\SquadQuery\Binaries\Win64\SquadQuery.exe`, launched directly | The real game, so its exit code and kill are reliable (`01` §7) |
+| `run_bench.py` | `performance_core_mask()`, `pin_self()`, `applied_mask()` copied unchanged | Every timed run pinned to the performance cores (`01b` B-2) |
+| `run_bench.py` | `CONFIGS` holds only `Scripted` in S2 | Each configuration enters with the step that implements it |
+| `run_bench.py` | Moves `_agents.csv` and `_events.csv`; `decision_metrics()` computes conflicts per minute, switches per agent per event, oscillations, time-to-cover median and p95 (over agents that reached cover), in-cover-by-next-event and in-cover share | The decision-quality metrics of `01` §6.3 |
+| `run_bench.py` | **Already in cover** (the share of agent-events at 0 s) and **time to cover over the agents that moved** (median, p95), besides the overall figures; **stuck at end** (agents whose final distance to their slot is over 75 cm) | *Added after the first S2 run* (`09` S2-a): two thirds of agents kept a slot that stayed valid for the next threat, so the overall median time to cover was 0.00 s and said nothing |
+| `run_bench.py` | The **walk ratio**: per agent and event with at least 1 m to go (`MIN_WALK_CM`), time to cover ÷ (distance ÷ walking speed); median and p95 | 1.0 would be a decision on the event frame and a straight walk. The scripted oracle decides on the event frame, so its ratio measures only the detours around blocks and the start-up of character movement; a configuration's ratio above the oracle's is its decision delay (S2 check, `09`) |
+| `run_bench.py` | A run fails if its exit code isn't 0, its capture is missing or partial, a report is missing or unreadable, or its log has an `Error:` line | Nothing silently enters a summary |
+| `run_bench.py` | `--label` may contain only letters, digits, `_` and `-`; the summary's definition of AI time is generated from `AI_COLUMN` | The label becomes part of `-SQRunTag=`, which the game reads only up to the first space; a definition written out twice had already drifted once (*review*) |
+| `run_bench.py` | `STARTUP_MARGIN_SECONDS = 240` | Engine start, navmesh build, spawning and the first-run PSO wait seen in Phase 4 (`09`) |

@@ -56,7 +56,6 @@ namespace SQArena
 	static_assert(CornerCm < 0.5f * USQArenaSubsystem::FloorSizeCm, "path-check corners must lie on the floor");
 	constexpr float NavBoundsHeightCm = 1000.f;          // the bounds box spans z = -5 m .. +5 m
 	constexpr float ThreatClearanceCm = 260.f;           // a threat never stands inside or against a block
-	constexpr float MinThreatDistanceCm = 800.f;         // the cover query's filter (02 section 7), reported by the check
 	constexpr int32 MinHiddenSlotsPerThreat = 256;       // 2 x 128 agents: the S1 pass threshold (03)
 
 	// One synchronous path test between two floor points. It builds no path object, and a partial path counts as
@@ -437,11 +436,8 @@ bool USQArenaSubsystem::RunSelfCheck(UWorld& World) const
 		int32 Hidden = 0, HiddenFar = 0;
 		for (int32 SlotIndex = 0; SlotIndex < Slots.Num(); ++SlotIndex)
 		{
-			if (IsSlotHidden(ThreatIndex, SlotIndex))
-			{
-				++Hidden;
-				HiddenFar += FVector::Dist2D(ThreatPositions[ThreatIndex], Slots[SlotIndex].Location) >= SQArena::MinThreatDistanceCm ? 1 : 0;
-			}
+			Hidden += IsSlotHidden(ThreatIndex, SlotIndex) ? 1 : 0;
+			HiddenFar += IsValidCover(ThreatIndex, SlotIndex) ? 1 : 0;
 		}
 		MinHidden = FMath::Min(MinHidden, Hidden);
 		MaxHidden = FMath::Max(MaxHidden, Hidden);
