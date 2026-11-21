@@ -14,6 +14,7 @@ class AAIController;
 class UEnvQuery;
 class USQArenaSubsystem;
 class USquad;
+class USquadMemberComponent;
 struct FPathFollowingResult;
 
 /** How an agent chooses its cover slot (01 section 6.2). */
@@ -23,6 +24,7 @@ enum class ESQBrainMode : uint8
 	PolledEQS,      // B0: own SingleResult query every 0.5 s +/- 0.1 s, no reservation
 	PolledClaims,   // B1: B0 + a Smart Object claim of the pick
 	EventClaims,    // B2: own query after a threat event (or a failed claim), + claims
+	SquadFollower,  // SQ: moves to the slot its squad assigns (USquadMemberComponent::OnAssignmentChangedNative)
 };
 
 /** What one brain counted since the director last reset it (at BenchStart). */
@@ -57,8 +59,9 @@ public:
 	USQAgentBrainComponent();
 
 	/**
-	 * Chooses the mode; for the EQS modes also the query template (shared by all agents) and the poll seed. Call after
-	 * the agent has finished spawning: its squad membership and tick function must be registered.
+	 * Chooses the mode; for the per-agent EQS modes also the query template (shared by all agents) and the poll seed;
+	 * SquadFollower binds to the owner's USquadMemberComponent. Call after the agent has finished spawning: its squad
+	 * membership and tick function must be registered.
 	 */
 	void ConfigureMode(ESQBrainMode InMode, const UEnvQuery* InAgentQuery, int32 PollSeed);
 
@@ -105,6 +108,7 @@ private:
 	void OnQueryFinished(TSharedPtr<FEnvQueryResult> Result);
 	bool ShouldKeepCurrent(int32 NewSlot);
 	void ReleaseClaim();
+	void OnAssignmentChanged(USquadMemberComponent& Member);
 
 	UPROPERTY(Transient)
 	TObjectPtr<USQArenaSubsystem> Arena;

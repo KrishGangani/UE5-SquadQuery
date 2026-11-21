@@ -4,11 +4,11 @@
 
 **Domain:** AI decision-making at scale · **Difficulty:** ★★★½☆ · **Engine:** UE 5.8.4
 
-> **Status: closed at step S4 of 8 (2026-11-21), by the owner's decision.** Built and measured: the runtime arena (packaged-build proof), the benchmark harness, the **three per-agent baselines B0, B1, B2** (captured at 8 / 32 / 128 agents, 3 runs each) and the **exact assignment solver** (tested against brute force). **Not built into the game: SquadQuery's shared squad evaluation (S5)**, so the comparison it was designed for (SC1–SC6) is **not measured**. Every number below comes from a packaged Development run or a unit test; nothing is estimated.
+> **Status: closed at step S5 of 8 (2026-11-21), by the owner's decision.** Built and measured: the runtime arena (packaged-build proof), the benchmark harness, the **three per-agent baselines B0, B1, B2** (8 / 32 / 128 agents, 3 runs each), the **exact assignment solver** (tested against brute force) and **SquadQuery's shared squad evaluation** in its smallest working form, checked once against B0 at 128 agents (2 runs of 30 s). **Not measured:** N = 8 and 32 for SquadQuery, B1/B2 in the same batch, and the full S7 campaign; S6 (settings, budget) and S8 (debug view, ablations) were not built. Every number below comes from a packaged Development run or a unit test; nothing is estimated.
 
 | Phase | 1 Problem | 2 Research | 3 Architecture | 4 Foundation | 5 Implementation | 6–10 |
 |---|---|---|---|---|---|---|
-| State | ✓ | ✓ | ✓ final | ✓ | S1–S4 ✓; S5–S8 not built | docs for S1–S4; 10, 12 written |
+| State | ✓ | ✓ | ✓ final | ✓ | S1–S5 ✓ (S5 smallest form); S6–S8 not built | docs for S1–S5; 10, 12 written |
 
 ---
 
@@ -76,7 +76,30 @@ xychart-beta
 
 **The solver** ([09 §S4](Explanation/09_Testing_And_Benchmarks.md)): `FSquadAssignmentSolver` (Hungarian method, shortest augmenting path) equals brute force on 1,000 random instances, never chooses a forbidden pair, handles more agents than slots, and solves 8 × 128 in 6.92 µs (mean, Development editor).
 
-**Not measured:** SquadQuery itself (SC1–SC6) and the packaged solve-time p99 (SC7's speed half). The bar it would have to clear is B2: 0.026 ms mean at 128 agents, with conflicts already at 0.
+## Results: SquadQuery against B0 at 128 agents (one short check)
+
+Batch [`2026-11-21_105136_S5check`](Benchmarks/Summaries/2026-11-21_105136_S5check_summary.md) ([event frames](Benchmarks/Summaries/2026-11-21_105136_S5check_events.md)): B0 and SQ interleaved, 2 runs each + priming, **30 s captures** (5 threat events), same build settings as above. Medians of 2 runs. B2's column is its S3 value from the 60 s batch above, **for reference only (cross-batch)**.
+
+| N = 128 | AI mean (ms) | AI p99 | Worst event frame | Item tests / s | Conflicts / min | Claim failures / min | In cover by next event | Time to cover p95 (s) |
+|---|---|---|---|---|---|---|---|---|
+| **B0** (this batch) | 0.403 | 0.91 | 1.37 | 21,294 | 200 | 0 | 66% | 5.33 |
+| **SQ** SquadQuery | **0.020** | 1.20 | 3.12 | **522** | **0** | **0** | **96%** | 4.03 |
+| B2 (S3, reference) | 0.026 | 0.05 | 8.35 | 1,477 | 0 | 151 | 96% | 3.55 |
+
+```mermaid
+xychart-beta
+    title "128 agents: item tests per second (EQS work)"
+    x-axis ["B0", "B2 (S3)", "SQ"]
+    y-axis "item tests / s" 0 --> 22000
+    bar [21294, 1477, 522]
+```
+
+**What it shows** ([09 §S5](Explanation/09_Testing_And_Benchmarks.md)):
+- **One query per squad instead of one per agent**: 2.5% of B0's item tests and 20× less mean AI time, with 0 conflicts and 0 claim failures.
+- **Decisions as good as the claim baselines**: 96% of agents in cover by the next event (B0: 66%); an automation test confirms the shared path makes the per-agent path's decision for a squad of one (10,000 cases).
+- **Not everything is met**: the worst event frame is 3.1 ms (SC2's bound is 2.0 ms; B2's is 8.35 ms), the p95 time to cover (4.03 s) is behind B2's 3.55 s, and one run's slowest solve took 116 µs (SC7's bound is 50 µs).
+
+**Not measured:** SquadQuery at N = 8 and 32, B1 and B2 in the same batch as SquadQuery, 3 runs of 60 s, and so SC1 and SC6 at N = 32. The SC table with every verdict is at the end of [09](Explanation/09_Testing_And_Benchmarks.md).
 
 ## Recorded demonstration
 
@@ -96,7 +119,7 @@ The UE project is in [SquadQuery/](SquadQuery/) (UE 5.8.4, C++):
 - the reusable system is the plugin `SquadQueryCore`;
 - the arena, agents, baselines and benchmark are in the game module `SquadQuery`.
 
-Built: the arena (`USQArenaSubsystem`, `ASQCoverBlock`), agents and brains with B0/B1/B2 (`ASQAgent`, `USQAgentBrainComponent`), the benchmark director (`USQBenchmarkSubsystem`), the cover query (`SQQueries`, `USQCoverSlotGenerator`), the squad registry and threat context (`USquadQuerySubsystem`, `USquadQueryContext_Threat`) and the solver (`FSquadAssignmentSolver`) with its automation tests. The design of the rest is in [02 §4](Explanation/02_System_Architecture.md); the build order and where it stopped in [03](Explanation/03_Implementation_Roadmap.md).
+Built: the arena (`USQArenaSubsystem`, `ASQCoverBlock`), agents and brains with B0/B1/B2 (`ASQAgent`, `USQAgentBrainComponent`), the benchmark director (`USQBenchmarkSubsystem`), the cover query (`SQQueries`, `USQCoverSlotGenerator`), the squad registry and threat context (`USquadQuerySubsystem`, `USquadQueryContext_Threat`) the solver (`FSquadAssignmentSolver`) with its automation tests, and the shared squad evaluation (`USquadQuerySubsystem` as a tickable subsystem, `USquadQueryContext_Members`, member assignments with `OnAssignmentChanged`) behind `-SQMode=SQ`. The design of the rest is in [02 §4](Explanation/02_System_Architecture.md); the build order and where it stopped in [03](Explanation/03_Implementation_Roadmap.md).
 
 ## Documentation
 
@@ -107,7 +130,7 @@ Built: the arena (`USQArenaSubsystem`, `ASQCoverBlock`), agents and brains with 
 | [01b_Research_Findings](Explanation/01b_Research_Findings.md) | Phase 2: verified engine behaviour (UE 5.8.4), existing work, and what it changed in the design |
 | [02_System_Architecture](Explanation/02_System_Architecture.md) | Final v1.0: modules, classes, data flow, defaults, safety rules, rejected alternatives |
 | [03_Implementation_Roadmap](Explanation/03_Implementation_Roadmap.md) | Small, ordered build steps; baselines captured before SquadQuery code |
-| [04](Explanation/04_CPP_Fundamentals.md) · [05](Explanation/05_Line_By_Line_Code_Explanation.md) · [06](Explanation/06_Unreal_APIs_And_Macros.md) · [07](Explanation/07_Common_Mistakes.md) | C++ fundamentals, line-by-line code, APIs and macros, common mistakes. Written with the code, current to S4 |
+| [04](Explanation/04_CPP_Fundamentals.md) · [05](Explanation/05_Line_By_Line_Code_Explanation.md) · [06](Explanation/06_Unreal_APIs_And_Macros.md) · [07](Explanation/07_Common_Mistakes.md) | C++ fundamentals, line-by-line code, APIs and macros, common mistakes. Written with the code; 05 is current to S5, 04, 06 and 07 to S4 |
 | [09](Explanation/09_Testing_And_Benchmarks.md) | Every check, with its command and result; the SC1–SC7 table |
 | [08](Explanation/08_Debugging_And_Profiling.md) · [10](Explanation/10_Interview_Questions.md) · [11](Explanation/11_Optimization_Decisions.md) · [12](Explanation/12_Future_Scalability.md) | Debugging and profiling (as of S3), interview questions, optimisation decisions (not written), future scalability |
 | [Phase2_Raw_Notes/](Explanation/Phase2_Raw_Notes/README.md) | The Phase 2 audit trail: every engine line and web page behind `01b` |

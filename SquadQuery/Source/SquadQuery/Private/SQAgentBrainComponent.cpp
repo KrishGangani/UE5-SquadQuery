@@ -12,6 +12,7 @@
 #include "SmartObjectSubsystem.h"
 #include "SQArenaSubsystem.h"
 #include "Squad.h"
+#include "SquadMemberComponent.h"
 #include "SquadQueryContext_Threat.h"
 #include "SquadQueryWork.h"
 #include "TimerManager.h"
@@ -41,6 +42,16 @@ void USQAgentBrainComponent::ConfigureMode(ESQBrainMode InMode, const UEnvQuery*
 	// first tick only sets the delay, and the polls start after it.
 	PendingFirstPollDelay = static_cast<float>(PollStream.FRandRange(0.0, PollIntervalSeconds));
 	SetComponentTickEnabled(UsesPolling());
+
+	if (Mode == ESQBrainMode::SquadFollower)
+	{
+		// The squad decides and claims (02 section 9); the brain only turns the decision into movement.
+		USquadMemberComponent* Member = GetOwner()->FindComponentByClass<USquadMemberComponent>();
+		if (ensureMsgf(Member, TEXT("SquadFollower needs a USquadMemberComponent on %s"), *GetNameSafe(GetOwner())))
+		{
+			Member->OnAssignmentChangedNative.AddUObject(this, &USQAgentBrainComponent::OnAssignmentChanged);
+		}
+	}
 }
 
 void USQAgentBrainComponent::BeginPlay()
@@ -222,6 +233,16 @@ void USQAgentBrainComponent::ReleaseClaim()
 			SmartObjects->MarkSlotAsFree(Claim);
 		}
 		Claim.Invalidate();
+	}
+}
+
+void USQAgentBrainComponent::OnAssignmentChanged(USquadMemberComponent& Member)
+{
+	// Called from the squad's result handler, inside its SquadQueryDecide scope (SetTarget opens its own as well). An
+	// invalid slot handle (no slot for this member) maps to INDEX_NONE, which stops the agent.
+	if (Arena)
+	{
+		SetTarget(Arena->FindSlotIndex(Member.GetAssignedSlot()));
 	}
 }
 

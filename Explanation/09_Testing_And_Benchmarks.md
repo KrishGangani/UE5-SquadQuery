@@ -298,6 +298,49 @@ Not applied, with the reason: a one-shot timer instead of the first-tick delay (
 
 **Not done in S4, by the owner's decision to close the project:** no `code-review` / `simplify` pass after the last fixes (the audit above covers the version before them), and no packaged solve-time measurement.
 
+## S5 · The shared squad evaluation, smallest form, against B0 (2026-11-21)
+
+**Job `20261121_104945_c144ff`** ("P07 S5: build editor + game (shared squad evaluation), tests SquadQuery.*, package, B0 vs SQ N128 x2 + priming (30 s capture)"): ✅ exit 0 in 183.5 s. Both targets built with **0 errors, 0 warnings**; cook `Success - 0 error(s), 0 warning(s)`. The code is `05` part F.
+
+| # | Check | Result |
+|---|---|---|
+| S5-1 | `Tools\run_tests.bat SquadQuery`: the four solver tests of S4 and the new **`SquadQuery.Squad.SameDecisionAsPerAgent`** (10,000 random squad-of-one decisions: the shared path's cost function and solver against the per-agent keep-current rule, other squads' claims included) | ✅ all 5 `Result={Success}`; `TEST COMPLETE. EXIT CODE: 0` |
+| S5-2 | Batch `2026-11-21_105136_S5check`: **B0 vs SQ at N = 128, 2 interleaved runs each + 1 priming run**, 30 s capture (5 threat events), pinned (`cpu_affinity: 0xFFFF`), 11–13 s of wall time per run | ✅ every run exit 0, complete capture, both reports, 0 log errors. Summary `Benchmarks/Summaries/2026-11-21_105136_S5check_summary.md`; event frames `…_events.md` |
+
+**This is one short check, not the S7 campaign.** 2 runs per configuration (not 3), one agent count, a 30 s capture instead of 60 s, and only B0 in the same batch. B1 and B2 were not re-run: wherever SQ is compared with them below, the B1/B2 figure is the S3 batch's (60 s capture), and the comparison is marked as cross-batch. Per-minute rates over 5 events are coarser than over 10: B0's conflicts read 200 per minute here and 160 in S3 for the same behaviour.
+
+**Repeatability.** As in S3, both runs of each configuration have identical decision metrics (every decision cell's range is zero) and identical work counters (SQ: 80 shared queries, 7,914 items generated, 15,651 item tests, 268 assignments in each run); only the timings differ.
+
+**Results, N = 128** (median of 2 runs [min-max]):
+
+| | B0 (this batch) | SQ (this batch) | B2 (S3 batch, for reference) |
+|---|---|---|---|
+| AI mean (ms) | 0.403 [0.399-0.408] | **0.020** [0.019-0.020] | 0.026 |
+| AI p99 (ms) | 0.908 | 1.196 [1.129-1.262] | 0.050 |
+| AI p99.9 (ms) | 1.246 | 2.266 [2.249-2.284] | 7.395 |
+| AI max = worst event frame (ms) | 1.365 | **3.116** [2.916-3.316] | 8.347 |
+| AI mean outside the event windows (ms) | 0.398 | 0.001 | 0.001 |
+| GameThreadTime median (ms) | 3.476 | 2.550 | |
+| Queries per second | 256.6 | 2.7 (one per squad per event: 16 squads × 5 events = 80) | 23.9 |
+| Item tests per second | 21,294 | **522** (2.5% of B0) | 1,477 |
+| Conflict onsets per minute | 200 | **0** | 0 |
+| Claim failures per minute | 0 (no claims) | **0** | 151 |
+| Stale results / aborted queries | | 0 / 0 | |
+| Switches per agent per event; oscillations | 0.40; 0 | 0.42; 0 | |
+| Time to cover, agents that moved: median / p95 (s) | 1.63 / 5.33 | **1.24 / 4.03** | 1.04 / 3.55 |
+| In cover by the next event | 66.1% | **95.9%** | 95.5% |
+| In-cover share of agent-frames | 56.1% | 84.5% | 86.1% |
+| Agents not at their slot at the end | 40 | 9 | |
+| Packaged solve time, 8 × ~100 (µs): p50 / p99 = max of 80 solves | | r1 5.90 / **116.1**; r2 5.80 / 32.9 | |
+
+**What it shows:**
+- **The shared query removes repeated work** (H1, H3): 41× fewer item tests than B0 and 2.8× fewer than B2's S3 figure, although each shared query traces every candidate (H2): 196 item tests per query against B2's 62.
+- **The cap spreads the event spike but does not remove it** (H6): the worst event frame is 3.1 ms against B2's 8.35 ms, but above SC2's 2.0 ms. With 16 squads and `MaxEvaluationsPerFrame = 4` the work of one event is spread over 4 frames, each starting four 8-member queries; a cap measured in item tests rather than queries (S6's budget) is what would bound a frame.
+- **Joint assignment gives the baselines' best decisions without their races** (H4, H5): 0 conflicts like the claim baselines, 0 claim failures (B2: 151 per minute), and 95.9% in cover by the next event; the p95 time to cover (4.03 s) is better than B0's but worse than B2's 3.55 s from S3.
+- **Solve times**: the median solve is 6 µs; the slowest of 80 was 116 µs in r1 and 33 µs in r2. With 80 samples per run the p99 is the maximum, so one slow solve (cache, preemption) decides it.
+
+**Not done in S5, by the owner's decision:** no `code-review` / `simplify` pass, no S6 settings or budget, no S7 campaign (N = 8 and 32, B1/B2 in the same batch, 3 runs, 60 s), no S8 debug view or ablations, no video.
+
 ---
 
 ## Data caveat: overlapping CPU work during the baseline batch
@@ -316,15 +359,14 @@ r2 is the highest on mean AI time (+2.1% over r1, +2.6% over r3) and on GameThre
 
 ## Success criteria SC1–SC7 (final state)
 
-The shared squad evaluation (S5) was designed and drafted but **not built into the measured game** when the project was closed. Every criterion that needs SquadQuery's own runs is therefore **not measured**; nothing below is estimated.
+SquadQuery's shared evaluation was measured once, in the short S5 check: **N = 128 only, against B0 only, 2 runs of 30 s**. Everything else the criteria ask for is **not measured**: N = 32, B1 and B2 in the same batch, and 3 runs of 60 s. A comparison with B2 uses its S3 figure and is marked cross-batch. Nothing below is estimated.
 
 | SC | Criterion (`01` §8) | Result |
 |---|---|---|
-| SC1 | SQ's mean AI ms per frame below the best of B0–B2 at N = 32 and 128 | **Not measured** (no SQ runs). The bar it would have to clear: B2, 0.007 ms (N = 32) and 0.026 ms (N = 128) |
-| SC2 | SQ's p99 AI ms ≤ 2.0 ms at N = 128 | **Not measured.** Baseline context: B2's p99 is 0.05 ms, but its event frames reach 8.35 ms; S3 decided that SC2 is judged on p99.9 and the event-window maximum too (`02` §13) |
-| SC3 | SQ's item tests per second ≤ 50% of B0's at N = 128 | **Not measured.** B0: 21,395 item tests per second; 50% = 10,698 |
-| SC4 | SQ: 0 assignment conflicts | **Not measured** for SQ. Note: B1 and B2 already reach 0 with Smart Object claims; B0 has 160 onsets per minute at N = 128 |
-| SC5 | SQ: ≤ 1.0 switches per agent per event, 0 oscillations | **Not measured** for SQ. Baselines: 0.21–0.39 switches per agent per event, 0 oscillations in every configuration |
-| SC6 | SQ's p95 time to cover ≤ the best baseline's; ≥ 95% in cover by the next event | **Not measured** for SQ. Best baseline p95 (agents that moved): B1 2.97 s (N = 32), B2 3.55 s (N = 128); B2 reaches 95.5% in cover by the next event at N = 128 |
-| SC7 | Solver: total equals brute force on 1,000 instances; forbidden pairs never chosen; n > m handled; packaged p99 ≤ 50 µs for 8 × 128 | **Correctness: met** (S4-1 to S4-3). **Speed: not measured** in the packaged build; the Development-editor mean is 6.92 µs (S4-4), a seventh of the bound, but that is not the criterion |
-
+| SC1 | SQ's mean AI ms per frame below the best of B0–B2 at N = 32 and 128 | **N = 128: 0.020 ms**, 20× below B0 in the same batch (0.403) and below B2's S3 value (0.026, cross-batch, so not a valid SC1 verdict). **N = 32: not measured.** Overall: **not measured** to the criterion's standard |
+| SC2 | SQ's p99 AI ms ≤ 2.0 ms at N = 128 (S3: judged on p99.9 and the event-window maximum too) | **Not met.** p99 1.196 ms passes, but p99.9 is 2.27 ms and the worst event frame 3.12 ms. Better than B2's 8.35 ms worst frame (cross-batch) |
+| SC3 | SQ's item tests per second ≤ 50% of B0's at N = 128 | **Met:** 522 against B0's 21,294 in the same batch (2.5%). Against B2 (no threshold): 35% of its S3 figure |
+| SC4 | SQ: 0 assignment conflicts in every run at every N | **Met at N = 128** (0 in both runs); other N not measured |
+| SC5 | SQ: ≤ 1.0 switches per agent per event, 0 oscillations | **Met at N = 128:** 0.42 switches per agent per event, 0 oscillations |
+| SC6 | SQ's p95 time to cover ≤ the best baseline's at N = 32 and 128; ≥ 95% in cover by the next event | **N = 128: in cover by the next event met** (95.9%); **p95 time to cover not met:** 4.03 s against B2's 3.55 s (S3, cross-batch; B0 here: 5.33 s). N = 32 not measured |
+| SC7 | Solver: total equals brute force on 1,000 instances; forbidden pairs never chosen; n > m handled; packaged p99 ≤ 50 µs for 8 × 128 | **Correctness: met** (S4-1 to S4-3; the decision test S5-1 too). **Speed: not met** in one of two runs: packaged p99 116.1 µs (r1) and 32.9 µs (r2), median 6 µs; the squad's candidate lists were about 100 slots, not exactly 128 |

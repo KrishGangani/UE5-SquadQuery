@@ -1,4 +1,4 @@
-// SquadQueryCore - puts an actor into a squad.
+// SquadQueryCore - puts an actor into a squad, and carries the slot the squad assigned to it.
 
 #include "SquadMemberComponent.h"
 
@@ -26,4 +26,16 @@ void USquadMemberComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		Subsystem->UnregisterMember(*this);
 	}
 	Super::EndPlay(EndPlayReason);
+}
+
+void USquadMemberComponent::SetAssignment(const FSmartObjectSlotHandle& Slot, const FVector& Location)
+{
+	if (Slot == AssignedSlot)
+	{
+		return;
+	}
+	AssignedSlot = Slot;
+	AssignedLocation = Location;
+	OnAssignmentChangedNative.Broadcast(*this);
+	OnAssignmentChanged.Broadcast(this);
 }

@@ -34,7 +34,7 @@ class USQArenaSubsystem;
  *   conflicts       onsets of "two or more agents target the same slot"
  *   switches, oscillations, move requests   from the brains, counted over the capture
  *
- * Command line: -SQMode=Scripted|B0|B1|B2 (S5 adds SQ), -SQAgents=N (default 0: no run),
+ * Command line: -SQMode=Scripted|B0|B1|B2|SQ, -SQAgents=N (default 0: no run),
  * -SQWarmup=SEC (10), -SQCapture=SEC (60), -SQEventInterval=SEC (6, at least 1), -SQRunTag=NAME (run), -SQExit.
  * The seed is the arena's (-SQSeed=S).
  */
@@ -127,6 +127,10 @@ private:
 	/** The per-agent cover query (B0-B2), one template shared by every agent (EQS caches it, 01b finding 4). */
 	UPROPERTY(Transient)
 	TObjectPtr<UEnvQuery> AgentQuery;
+
+	/** The squad cover query (SQ), handed to the squad subsystem. */
+	UPROPERTY(Transient)
+	TObjectPtr<UEnvQuery> SharedSquadQuery;
 
 	UPROPERTY(Transient)
 	TObjectPtr<USQArenaSubsystem> Arena;

@@ -45,6 +45,7 @@ namespace SQBench
 		{ TEXT("B0"), ESQBrainMode::PolledEQS },
 		{ TEXT("B1"), ESQBrainMode::PolledClaims },
 		{ TEXT("B2"), ESQBrainMode::EventClaims },
+		{ TEXT("SQ"), ESQBrainMode::SquadFollower },
 	};
 
 	constexpr float SquadRingRadiusCm = 250.f;         // members start on a ring around their squad centre
@@ -152,7 +153,16 @@ void USQBenchmarkSubsystem::HandleArenaReady()
 
 void USQBenchmarkSubsystem::StartRun(UWorld& World)
 {
-	if (BrainMode != ESQBrainMode::Scripted)
+	if (BrainMode == ESQBrainMode::SquadFollower)
+	{
+		// SquadQuery: one shared query per squad, evaluated by the subsystem on events (02 sections 2 and 6).
+		if (USquadQuerySubsystem* Squads = World.GetSubsystem<USquadQuerySubsystem>())
+		{
+			SharedSquadQuery = SQQueries::MakeSquadCoverQuery(*this);
+			Squads->SetSharedQuery(SharedSquadQuery);
+		}
+	}
+	else if (BrainMode != ESQBrainMode::Scripted)
 	{
 		AgentQuery = SQQueries::MakeAgentCoverQuery(*this);
 	}
@@ -290,6 +300,10 @@ void USQBenchmarkSubsystem::Tick(float DeltaTime)
 			{
 				Agents[Index]->GetBrain()->ResetCounters();   // from here the counters are the capture's
 			}
+		}
+		if (USquadQuerySubsystem* Squads = GetWorld()->GetSubsystem<USquadQuerySubsystem>())
+		{
+			Squads->ResetTotals();   // the squad evaluation's counters too
 		}
 		// A conflict already running when the capture starts is a capture conflict too: forget the warm-up's state so
 		// its first captured frame counts as an onset.
@@ -530,11 +544,27 @@ void USQBenchmarkSubsystem::WriteRunReport() const
 #else
 	const int32 EqsDebugData = 0;
 #endif
+	// The squad evaluation's work (SQ; zeros for the baselines), and the solve time distribution for SC7.
+	FSquadQueryTotals SquadTotals;
+	if (const USquadQuerySubsystem* Squads = GetWorld()->GetSubsystem<USquadQuerySubsystem>())
+	{
+		SquadTotals = Squads->GetTotals();
+	}
+	TArray<float> Solves = SquadTotals.SolveMicroseconds;
+	Solves.Sort();
+	const auto SolvePercentile = [&Solves](double P) -> double
+	{
+		return Solves.IsEmpty() ? 0.0 : Solves[FMath::Clamp(FMath::CeilToInt32(P / 100.0 * Solves.Num()) - 1, 0, Solves.Num() - 1)];
+	};
+
 	const FString Header = FString::Printf(
-		TEXT("# run=%s mode=%s agents=%d seed=%d arenahash=0x%08X warmup=%.3f capture=%.3f interval=%.3f walkspeed=%.1f eqsdebug=%d benchstart=%.6f captured_events=%d frames=%d agent_frames=%lld in_cover_agent_frames=%lld conflict_onsets=%d conflict_agent_frames=%lld\n"),
+		TEXT("# run=%s mode=%s agents=%d seed=%d arenahash=0x%08X warmup=%.3f capture=%.3f interval=%.3f walkspeed=%.1f eqsdebug=%d benchstart=%.6f captured_events=%d frames=%d agent_frames=%lld in_cover_agent_frames=%lld conflict_onsets=%d conflict_agent_frames=%lld sq_queries_started=%d sq_queries_finished=%d sq_queries_aborted=%d sq_stale_results=%d sq_items_generated=%lld sq_item_tests=%lld sq_evaluations=%d sq_assignments=%d sq_claim_failures=%d sq_query_latency_s=%.6f sq_solves=%d sq_solve_us_p50=%.2f sq_solve_us_p99=%.2f sq_solve_us_max=%.2f\n"),
 		*Settings.RunTag, *Settings.Mode, Agents.Num(), Arena->GetSeed(), Arena->GetArenaHash(), Settings.WarmupSeconds,
 		Settings.CaptureSeconds, Settings.EventIntervalSeconds, ASQAgent::WalkSpeedCmPerSecond, EqsDebugData, BenchStartTime, CapturedEvents,
-		CapturedFrames, AgentFrames, InCoverAgentFrames, ConflictOnsets, ConflictAgentFrames);
+		CapturedFrames, AgentFrames, InCoverAgentFrames, ConflictOnsets, ConflictAgentFrames, SquadTotals.QueriesStarted,
+		SquadTotals.QueriesFinished, SquadTotals.QueriesAborted, SquadTotals.StaleResults, SquadTotals.ItemsGenerated,
+		SquadTotals.ItemTests, SquadTotals.Evaluations, SquadTotals.Assignments, SquadTotals.ClaimFailures,
+		SquadTotals.QueryLatencySeconds, Solves.Num(), SolvePercentile(50.0), SolvePercentile(99.0), SolvePercentile(100.0));
 
 	FString AgentsReport = Header + TEXT("agent,squad,switches,oscillations,move_requests,move_retries,move_failures,queries_started,queries_finished,queries_aborted,items_generated,item_tests,keep_checks,claim_failures,query_latency_s,target_slot,final_x,final_y,final_slot_distance_cm\n");
 	for (int32 Index = 0; Index < Agents.Num(); ++Index)

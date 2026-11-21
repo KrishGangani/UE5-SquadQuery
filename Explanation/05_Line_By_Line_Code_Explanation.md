@@ -9,6 +9,7 @@
 | C | S2 (agents, director, scripts) | `SQAgent.h/.cpp`, `SQAgentBrainComponent.h/.cpp` (S2 version), `SQBenchmarkSubsystem.h/.cpp`, the changed `SquadQuery.Build.cs` and `DefaultEngine.ini`, `Tools\csv_stats.py`, `Tools\run_bench.py` |
 | D | S3 (squads, the per-agent query, baselines B0-B2) | `SquadQueryCore`: `Squad.h`, `SquadMemberComponent.h/.cpp`, `SquadQuerySubsystem.h/.cpp`, `SquadQueryContext_Threat.h/.cpp`, `SquadQueryWork.h/.cpp`, `Build.cs`; game: `SQCoverSlotGenerator.h/.cpp`, `SQQueries.h/.cpp`, `SQAgentBrainComponent` (S3 version), director, agent and arena changes; `Tools\run_bench.py`, `Tools\analyse_events.py` |
 | E | S4 (the assignment solver) | `SquadAssignmentSolver.h/.cpp`, `Tests/SquadAssignmentSolverTests.cpp`, `Tools\run_tests.bat` |
+| F | S5 (the shared squad evaluation, smallest form) | `SquadQueryCore`: `Squad.h`, `SquadMemberComponent.h/.cpp`, `SquadQuerySubsystem.h/.cpp`, `SquadQueryContext_Members.h/.cpp`, `Tests/SquadSameDecisionTests.cpp`, `Build.cs`; game: `SQQueries`, `SQAgentBrainComponent`, `SQBenchmarkSubsystem`; `Tools\run_bench.py` |
 
 Engine references are relative to `C:\Program Files\Epic Games\UE_5.8\Engine\`, version 5.8.4.
 
@@ -769,3 +770,85 @@ The Hungarian method in its shortest-augmenting-path form (`04` §15): agents ar
 ### E4. `Tools\run_tests.bat`
 
 Copied from UE5-UpdateBudget and renamed: runs `UnrealEditor-Cmd SquadQuery.uproject -ExecCmds="Automation RunTests <Filter>;Quit" -unattended -nullrhi -nosound -nosplash -nopause` with the default filter `SquadQuery` (every test of this project), writes `Saved\Logs\Tests.log` and a report under `Saved\Automation\Reports`, and returns the editor's exit code (non-zero on a failure).
+
+---
+
+## Part F · S5: the shared squad evaluation (smallest working form)
+
+S5 puts SquadQuery itself into the game, as configuration **SQ**: one EQS query per squad instead of one per agent, run only on events, its result turned into a cost matrix, the S4 solver assigning slots jointly, and the subsystem holding the Smart Object claims. Only what the comparison needs was built; the settings asset, the per-frame budget beyond a fixed cap, the debug view and the ablations of S6–S8 were not (`03`).
+
+### F1. `SquadQueryCore.Build.cs` (changed in S5)
+
+`SmartObjectsModule` joins the **public** dependencies: `SquadMemberComponent.h`, a public header, now holds an `FSmartObjectClaimHandle` (`SmartObjectRuntime.h`). The `.uplugin` already listed the SmartObjects plugin, so UBT has nothing to warn about.
+
+### F2. `Public\Squad.h` (changed in S5)
+
+| Line | What it does, and why |
+|---|---|
+| `IsEvaluating()`, `IsQueued()`, `GetGeneration()` | Read-only state for tests and debug views |
+| `int32 Generation` | Bumped by every event (threat moved, member joined or left). A result started under an older value is stale and thrown away (`02` §8) |
+| `bool bQueued` | The squad is in the subsystem's event queue; each squad is in it at most once, however many events arrive |
+| `TSharedPtr<FEnvQueryInstance> RunningQuery`, `QueryGeneration`, `QueryStartTime` | The shared query in flight: its `QueryID` aborts it, and its debug data gives the work done (`FSquadQueryWork`, as for the baselines, `01b` #1, #6) |
+| `friend class USquadQuerySubsystem` | Only the subsystem changes a squad |
+
+### F3. `Public\SquadMemberComponent.h` / `Private\SquadMemberComponent.cpp` (changed in S5)
+
+| Line | What it does, and why |
+|---|---|
+| `DECLARE_MULTICAST_DELEGATE_OneParam(FOnSquadAssignmentChangedNative, USquadMemberComponent&)` | The C++ notification: no reflection call per listener. The game's brain binds to it (F7) |
+| `DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSquadAssignmentChanged, …)` + `UPROPERTY(BlueprintAssignable)` | The same for Blueprint pawns, so any pawn can follow its squad without C++ (`02` §4.1) |
+| `GetAssignedSlot()`, `GetAssignedLocation()` | The decision, read by whoever moves the pawn. An invalid handle means "no slot" |
+| private `SetAssignment(Slot, Location)` | Called by the subsystem only (friend). Returns at once if the slot didn't change, so listeners hear only real changes (SC5 counts switches from them) |
+| `FSmartObjectClaimHandle Claim` | The claim the subsystem holds for this member. Kept on the member so a leaving member's claim can be freed in `UnregisterMember` (`01b` #7) |
+
+### F4. `Public\SquadQueryContext_Members.h` / `Private\SquadQueryContext_Members.cpp` (new)
+
+An EQS context with one point per member of the querying `USquad` (the query's owner), through `UEnvQueryItemType_Point::SetContextHelper`. Used as the generator's origin, it makes the squad's candidates exactly the union of what each member's own query would generate with the same box (the engine generator supports several origins, `01b` #10), which keeps SQ comparable with B0–B2.
+
+### F5. `Public\SquadQuerySubsystem.h` (changed in S5)
+
+| Line | What it does, and why |
+|---|---|
+| `class USquadQuerySubsystem : public UTickableWorldSubsystem` | Was a plain world subsystem; it now ticks to start queued evaluations. `GetStatId` names its tick for the stats system |
+| `struct FSquadQueryTotals` | The evaluation's own counters (queries started / finished / aborted, stale results, items generated, item tests, evaluations, assignments, claim failures, latency, one solve time per solve). The director writes them into the run report header; reset at `BenchStart` |
+| `SetSharedQuery(const UEnvQuery*)` | Turns the shared evaluation on (SQ) or off (null, the baselines). Every squad is aborted and requeued, so switching is safe at any time |
+| `IsIdle()` | No squad queued and none evaluating |
+| `MaxEvaluationsPerFrame = 4` | The cap that spreads an event's work over frames (H6). A constant here; the settings object was S6 |
+| `KeepCurrentBonusCm = 300` | The same 3 m keep-current rule as the baselines (`02` §7) |
+| `static float MemberSlotCost(float DistanceCm, bool bCurrentSlot)` | The solver's cost of one member–slot pair: the distance, plus the bonus on every slot except the member's own. Adding the bonus to the others instead of subtracting it from the current one keeps every cost ≥ 0. Public and static, so the decision test (F8) uses the very function `Assign` uses |
+| private `MarkDirty`, `StartEvaluation`, `AbortEvaluation`, `OnQueryFinished`, `Assign`, `ReleaseClaim` | The event loop (F6) |
+| `UPROPERTY TArray<TObjectPtr<USquad>> DirtyQueue` | Dirty squads in arrival order; a UPROPERTY so the garbage collector sees the pointers |
+| `FQueryFinishedSignature QueryFinishedDelegate` | Bound once and reused by every query, as the brains do |
+
+### F6. `Private\SquadQuerySubsystem.cpp` (changed in S5)
+
+| Function | What it does, and why |
+|---|---|
+| `RegisterMember` / `UnregisterMember` / `SetThreat` | As in S3, plus `MarkDirty`: joining, leaving and a moved threat are the three events. Leaving frees the member's claim first |
+| `MarkDirty` | `++Generation` always (so a query in flight is known to be stale even with evaluation off); queue the squad once if a shared query is set |
+| `Tick` | Inside a `SquadQueryDecide` exclusive CSV scope (counted as AI time, like the baselines' decision code): takes squads from the front of the queue until `MaxEvaluationsPerFrame` evaluations have started. A squad with nothing to evaluate (no threat yet, no members) leaves without using the cap |
+| `StartEvaluation` | Aborts a query still running (it answers an older question), then `PrepareQueryInstance(Request, AllMatching)` with **the squad as owner** (the contexts find it from there) and `RunQuery` with the shared delegate. `AllMatching`: the solver needs every hidden slot, not the best one (H2) |
+| `AbortEvaluation` | `AbortQuery` calls `OnQueryFinished` synchronously with an aborted result (`01b`), which counts it; then the pointer is reset |
+| `OnQueryFinished` | In `SquadQueryDecide` too (it runs inside the EQS tick, outside its time slice, `01b` #5). Ignores results for a query that isn't the squad's current one. Counts the work even of a thrown-away result. A stale or aborted result is dropped (the event that made it stale has already requeued the squad); a successful one goes to `Assign`; a failed one keeps the current assignment, as a baseline agent keeps its target |
+| `Assign` | Collects the members still in the squad and their positions. Builds the row-major cost matrix: `MemberSlotCost(Dist2D, current)` per pair, or `ForbiddenCost` for a slot claimed by anyone **outside** the squad (the query generates claimed slots too, so the squad sees its own). Times `FSquadAssignmentSolver::Solve` with `FPlatformTime::Seconds` (SC7's packaged solve time). Then **frees every claim that changes hands before taking any**, so two squadmates can swap; then claims and calls `SetAssignment`. A refused claim (not expected: the check and the claim run in one game-thread handler) is counted and requeues the squad |
+| `ReleaseClaim` | `MarkSlotAsFree` and invalidate |
+| `Deinitialize` | Removes queries still running (`SilentlyRemoveAllQueriesByQuerier`, no callback into a dying subsystem), clears every member's squad pointer, and empties the maps |
+
+### F7. Game side (changed in S5)
+
+| File | Change, and why |
+|---|---|
+| `SQQueries.h/.cpp` | `MakeSquadCoverQuery(Outer)`: the per-agent query's generator and its two filters (hidden from the threat, far enough from it), with origin `USquadQueryContext_Members`, claimed slots **included** (`bOnlyClaimable = false`, `bShouldIncludeClaimedSlots = true`) and **no distance score**: the personal term is the solver's cost (`02` §7) |
+| `SQAgentBrainComponent.h/.cpp` | Mode `SquadFollower`: no query, no polling, no claim of its own. `ConfigureMode` binds `OnAssignmentChangedNative` of the owner's `USquadMemberComponent` (an `ensure` if it is missing); `OnAssignmentChanged` maps the slot handle to the arena's slot index (`FindSlotIndex`) and calls the existing `SetTarget`, so movement, switch and oscillation counting are the baselines' code |
+| `SQBenchmarkSubsystem.h/.cpp` | `-SQMode=SQ` in the mode table. `StartRun` builds the squad query and hands it to the subsystem (`SetSharedQuery`); `BenchStart` also resets the subsystem's totals; the run report header gains the `sq_*` keys and the solve-time p50 / p99 / max |
+| `Tools\run_bench.py` | Config `SQ`. The query-work metrics add the header's `sq_*` totals to the brains' own (zero in SQ), so queries per second, item tests, claim failures and latency compare like for like; the summary gains stale results, evaluations and the solve-time columns |
+
+### F8. `Private\Tests\SquadSameDecisionTests.cpp` (new)
+
+`SquadQuery.Squad.SameDecisionAsPerAgent` checks that, for a squad of one, the shared path decides exactly as the per-agent path does. 10,000 random cases: 1–16 hidden slots at 0–30 m, about one in five claimed by another squad, the member without a slot or on one of them.
+
+| Line | What it does, and why |
+|---|---|
+| `PerAgentChoice` | The baseline rule restated from `USQAgentBrainComponent::OnQueryFinished` and `ShouldKeepCurrent`: the nearest slot not claimed by someone else; keep the current slot if it is valid and at most `KeepCurrentBonusCm` farther; no slot at all keeps the current target |
+| `SquadChoice` | What `Assign` does for one member: `MemberSlotCost` per slot, `ForbiddenCost` for a slot claimed outside the squad, `FSquadAssignmentSolver::Solve` for 1 × n; no usable slot keeps the current one |
+| `TestEqual(Differences, 0)`, `TestTrue(Keeps > 100)` | Every decision equal, and the keep-current branch actually exercised. Random float distances make exact ties (where either answer is right) vanishingly unlikely |

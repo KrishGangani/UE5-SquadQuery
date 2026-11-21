@@ -68,6 +68,7 @@ CONFIGS = {
     "B0": "-SQMode=B0",               # polled per-agent EQS (01 section 6.2)
     "B1": "-SQMode=B1",               # B0 + Smart Object claims
     "B2": "-SQMode=B2",               # event-driven per-agent EQS + claims
+    "SQ": "-SQMode=SQ",               # SquadQuery: shared squad evaluation, joint assignment
 }
 
 AI = csv_stats.AI_COLUMN
@@ -206,6 +207,10 @@ def decision_metrics(agents_path: str, events_path: str) -> dict:
         """The column summed over agents; a missing column or an empty cell counts 0."""
         return sum(float(r.get(column) or 0) for r in agents)
 
+    def squad(key: str) -> float:
+        """A squad-evaluation total from the report header (0 for the baselines and older reports)."""
+        return float(header.get(key, 0) or 0)
+
     captured_events = int(header.get("captured_events", 0))
     capture_seconds = float(header.get("capture", 60.0))
     capture_minutes = capture_seconds / 60.0
@@ -230,19 +235,26 @@ def decision_metrics(agents_path: str, events_path: str) -> dict:
         "in_cover_by_next_event": len(reached) / len(seconds) if seconds else 0.0,
         "already_in_cover": sum(1 for s in seconds if s == 0.0) / len(seconds) if seconds else 0.0,
         "stuck_at_end": sum(1 for r in agents if float(r.get("final_slot_distance_cm") or -1.0) > IN_COVER_RADIUS_CM),
-        # Query work (the per-agent EQS modes; zero for the oracle).
-        "queries_per_s": total("queries_started") / capture_seconds,
-        "queries_aborted": total("queries_aborted"),
-        "claim_failures_per_min": total("claim_failures") / capture_minutes,
+        # Query work: the brains' own queries (B0-B2) plus the squads' shared ones (SQ, in the report header).
+        "queries_per_s": (total("queries_started") + squad("sq_queries_started")) / capture_seconds,
+        "queries_aborted": total("queries_aborted") + squad("sq_queries_aborted"),
+        "claim_failures_per_min": (total("claim_failures") + squad("sq_claim_failures")) / capture_minutes,
         "keep_checks": total("keep_checks"),
+        "stale_results": squad("sq_stale_results"),
+        "evaluations": squad("sq_evaluations"),
+        "solves": squad("sq_solves"),
+        "solve_us_p50": squad("sq_solve_us_p50"),
+        "solve_us_p99": squad("sq_solve_us_p99"),
+        "solve_us_max": squad("sq_solve_us_max"),
     }
     # Item counts come from EQS debug data (plus one per keep-current trace), which exists only when the game had it
     # (eqsdebug=1 in the report header). Without it the numbers would be partial, so they are left out.
     if header.get("eqsdebug", "1") == "1":
-        result["item_tests_per_s"] = total("item_tests") / capture_seconds
-        result["items_generated_per_s"] = total("items_generated") / capture_seconds
-    if total("queries_finished"):
-        result["query_latency_mean_s"] = total("query_latency_s") / total("queries_finished")
+        result["item_tests_per_s"] = (total("item_tests") + squad("sq_item_tests")) / capture_seconds
+        result["items_generated_per_s"] = (total("items_generated") + squad("sq_items_generated")) / capture_seconds
+    finished = total("queries_finished") + squad("sq_queries_finished")
+    if finished:
+        result["query_latency_mean_s"] = (total("query_latency_s") + squad("sq_query_latency_s")) / finished
     if reached:
         result["time_to_cover_median"] = csv_stats.percentile(reached, 50.0)
         result["time_to_cover_p95"] = csv_stats.percentile(reached, 95.0)

@@ -10,6 +10,7 @@
 #include "EnvironmentQuery/Tests/EnvQueryTest_Trace.h"
 #include "SQArenaSubsystem.h"
 #include "SQCoverSlotGenerator.h"
+#include "SquadQueryContext_Members.h"
 #include "SquadQueryContext_Threat.h"
 
 namespace SQQueries
@@ -65,6 +66,25 @@ namespace SQQueries
 		for (int32 Index = 0; Index < Option->Tests.Num(); ++Index)
 		{
 			Option->Tests[Index]->TestOrder = Index;   // as an asset would store it; the manager only rebuilds it if unset (EnvQueryManager.cpp:874-884)
+		}
+		Query->GetOptionsMutable().Add(Option);
+		return Query;
+	}
+
+	UEnvQuery* MakeSquadCoverQuery(UObject& Outer)
+	{
+		UEnvQuery* Query = NewObject<UEnvQuery>(&Outer, TEXT("SQSquadCoverQuery"));
+		UEnvQueryOption* Option = NewObject<UEnvQueryOption>(Query);
+
+		USQCoverSlotGenerator* Generator = NewObject<USQCoverSlotGenerator>(Option);
+		Generator->Configure(USquadQueryContext_Members::StaticClass(), BoxHalfExtentCm, /*bOnlyClaimable*/ false, /*bIncludeClaimedSlots*/ true);
+		Option->Generator = Generator;
+
+		Option->Tests.Add(MakeHiddenFromThreatTest(*Option));
+		Option->Tests.Add(MakeFarFromThreatTest(*Option));
+		for (int32 Index = 0; Index < Option->Tests.Num(); ++Index)
+		{
+			Option->Tests[Index]->TestOrder = Index;
 		}
 		Query->GetOptionsMutable().Add(Option);
 		return Query;

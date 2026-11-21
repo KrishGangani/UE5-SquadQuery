@@ -22,4 +22,12 @@ namespace SQQueries
 	 * @param bOnlyClaimable  the generator keeps only claimable slots (the engine default; true for every baseline)
 	 */
 	UEnvQuery* MakeAgentCoverQuery(UObject& Outer, bool bOnlyClaimable = true);
+
+	/**
+	 * The shared squad query (SQ): the same two filters over the union of the members' boxes (origin: every member,
+	 * USquadQueryContext_Members), and no score, because the personal term is the solver's cost (02 section 7). The
+	 * squad must also see the slots it already holds, so claimed slots are generated and the solver forbids the ones
+	 * held outside the squad. Run it in AllMatching mode with the squad as owner.
+	 */
+	UEnvQuery* MakeSquadCoverQuery(UObject& Outer);
 }
