@@ -268,6 +268,63 @@ Not applied, with the reason: a one-shot timer instead of the first-tick delay (
 
 ---
 
-## Phases 5–8 (to be written)
+## S4 · The assignment solver and its tests (2026-11-21)
 
-- S4: solver tests; S5: SQ checks; S7: the headline matrix and SC1–SC7.
+**Job `20261121_104244_f374ce`** ("P07 S4 final: build editor + game (solver), automation tests SquadQuery.*"): ✅ exit 0 in 57.5 s. Both targets built with **0 errors, 0 warnings**. `Tools\run_tests.bat SquadQuery` ran every test of the project in the editor, headless:
+
+| # | Test | Result |
+|---|---|---|
+| S4-1 | `SquadQuery.Solver.MatchesBruteForce`: 1,000 random instances (1–6 agents, 0–8 candidates, ~10% forbidden pairs) | ✅ Success: 0 objective mismatches against brute force, 0 wrong returned totals, 0 infeasible answers |
+| S4-2 | `SquadQuery.Solver.KnownOptimum`: greedy 10 vs optimum 4 | ✅ Success: `{1, 0}`, total 4 |
+| S4-3 | `SquadQuery.Solver.EdgeCases`: no agents, no candidates, n > m, all forbidden, forbidden avoided, ties pinned to `{0, 1, 2}`, `+inf` never chosen | ✅ Success |
+| S4-4 | `SquadQuery.Solver.Timing8x128`: 2,000 solves of 8 agents × 128 candidates | ✅ Success; **6.92 µs per solve** (mean, Development editor; an order of magnitude, not the packaged p99 of SC7) |
+| | Summary line | `**** TEST COMPLETE. EXIT CODE: 0 ****` |
+
+### S4 audit trail (before the build)
+
+**1. `code-review` (medium).** The reviewer checked the solver line by line against the standard shortest-augmenting-path method and found it correct; seven findings on robustness and tests:
+
+| # | Finding | Decision |
+|---|---|---|
+| R1 | A `-inf` (or an overflowing negative) cost makes the potentials infinite, every reduced cost NaN, and the search loop endless | **Fixed:** non-finite costs are forbidden; NaN raises an ensure (`05` E2; `07` S4) |
+| R2 | A wrong-sized matrix silently returned "everyone unassigned"; the size product was 32-bit | **Fixed:** `ensureMsgf` in 64-bit arithmetic |
+| R3 | Allowed costs at or above `UnassignedCost` are never chosen; the precondition was only a comment | **Documented precisely** in the header (the squad system's costs are 1e4-1e5 against 1e7); no clamp, because a clamp would hide a caller bug |
+| R4 | The brute-force test never checked the returned total | **Fixed:** a third counter, `WrongTotals` |
+| R5 | The ties test compared two calls and could not fail | **Fixed:** pinned to `{0, 1, 2}` (computed with the Python prototype) |
+| R6 | Docs not yet updated | Done in this commit |
+| R7 | "Private no-slot column" misdescribed the shared padding | **Fixed** in the header |
+
+**2. `simplify`.** No engine solver exists to reuse (the reuse reviewer searched the engine and every plugin; only OpenCV and Boost.Graph come close, and neither fits a rectangular min-cost assignment). Applied: forbidden pairs as missing edges with one `IsForbidden` rule shared by the solver and the tests (the clamp and the readout re-check went away); `M` computed once; inline storage for the six scratch arrays (no heap on a normal solve); raw pointers in the inner loops (no range checks in Development builds, where the benchmark runs); in the tests, `Algo::Count`, `IsNearlyEqual`, `TestNotEqual`/`TestFalse` and a bit mask in `IsFeasible`. Not applied: a matrix type owning its dimensions (one caller; revisit if the greedy ablation adds a second solver), deferring the potential update (rounding could flip near-ties with fractional costs), and a shared random-matrix helper (two short copies).
+
+**Not done in S4, by the owner's decision to close the project:** no `code-review` / `simplify` pass after the last fixes (the audit above covers the version before them), and no packaged solve-time measurement.
+
+---
+
+## Data caveat: overlapping CPU work during the baseline batch
+
+Another project's offline CPU work overlapped batch `2026-11-21_085156_S3baseline` at about 08:59:05–08:59:25, around run `B0_N128_r2`. Checked against its siblings:
+
+| Run | AI mean (ms) | AI p95 | AI p99 | GameThreadTime median | FrameTime median | Decision metrics |
+|---|---|---|---|---|---|---|
+| B0 N128 r1 | 0.426 | 0.790 | 1.149 | 3.526 | 3.583 | identical |
+| **B0 N128 r2** | **0.435** | 0.809 | 1.132 | 3.601 | 3.660 | identical |
+| B0 N128 r3 | 0.424 | 0.796 | 1.075 | 3.563 | 3.662 | identical |
+
+r2 is the highest on mean AI time (+2.1% over r1, +2.6% over r3) and on GameThreadTime (+2.1%, +1.1%), but within the spread the other configurations show between runs (B1 N128: 0.376–0.381 ms; B0 N8: 0.032–0.039 ms), and its p99 lies between its siblings'. Its decision metrics are identical (the fixed step makes them exact). **Not an outlier: kept.** Every cost figure in this file is a median of 3 runs, so r2 does not set any reported value except where it is the median by chance (it is not: the B0 N128 median AI mean is r1's 0.426 ms).
+
+---
+
+## Success criteria SC1–SC7 (final state)
+
+The shared squad evaluation (S5) was designed and drafted but **not built into the measured game** when the project was closed. Every criterion that needs SquadQuery's own runs is therefore **not measured**; nothing below is estimated.
+
+| SC | Criterion (`01` §8) | Result |
+|---|---|---|
+| SC1 | SQ's mean AI ms per frame below the best of B0–B2 at N = 32 and 128 | **Not measured** (no SQ runs). The bar it would have to clear: B2, 0.007 ms (N = 32) and 0.026 ms (N = 128) |
+| SC2 | SQ's p99 AI ms ≤ 2.0 ms at N = 128 | **Not measured.** Baseline context: B2's p99 is 0.05 ms, but its event frames reach 8.35 ms; S3 decided that SC2 is judged on p99.9 and the event-window maximum too (`02` §13) |
+| SC3 | SQ's item tests per second ≤ 50% of B0's at N = 128 | **Not measured.** B0: 21,395 item tests per second; 50% = 10,698 |
+| SC4 | SQ: 0 assignment conflicts | **Not measured** for SQ. Note: B1 and B2 already reach 0 with Smart Object claims; B0 has 160 onsets per minute at N = 128 |
+| SC5 | SQ: ≤ 1.0 switches per agent per event, 0 oscillations | **Not measured** for SQ. Baselines: 0.21–0.39 switches per agent per event, 0 oscillations in every configuration |
+| SC6 | SQ's p95 time to cover ≤ the best baseline's; ≥ 95% in cover by the next event | **Not measured** for SQ. Best baseline p95 (agents that moved): B1 2.97 s (N = 32), B2 3.55 s (N = 128); B2 reaches 95.5% in cover by the next event at N = 128 |
+| SC7 | Solver: total equals brute force on 1,000 instances; forbidden pairs never chosen; n > m handled; packaged p99 ≤ 50 µs for 8 × 128 | **Correctness: met** (S4-1 to S4-3). **Speed: not measured** in the packaged build; the Development-editor mean is 6.92 µs (S4-4), a seventh of the bound, but that is not the criterion |
+

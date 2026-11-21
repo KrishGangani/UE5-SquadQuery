@@ -76,3 +76,13 @@
 | Comparing configurations with Development-only engine overhead that scales differently | Per-agent queries pay the EQS debugger's per-query bookkeeping N times as often as squad queries (`01b` #22) | Measure that overhead itself (its cycle stats) and report it next to the result (`02` §12) | `stat AI_EQS` / Insights: `EQS Debug StoreQuery`, `EQS Debug StoreStats` |
 | Expecting an agent to see its own claimed slot in its query | With claims, the current slot never comes back, so the agent switches every poll | Check the current slot separately (keep-current rule, `02` §7) | `switches` per agent per event in B1 vs B0 |
 | A claim that outlives its holder | Slots stay claimed after agents are destroyed; later queries find fewer slots | Free the claim in `EndPlay` (`05` D6) | Count claimed slots at the end of a run |
+
+## S4: the solver
+
+| Mistake | How to spot it | How to prevent it | How to debug it |
+|---|---|---|---|
+| ⚠ caught (review): **a non-finite cost in a potential-based algorithm.** One `-inf` turns the potentials into infinities and every reduced cost into NaN; no column wins the search and the loop never ends | The game thread hangs in `Solve` | Treat non-finite costs as forbidden, and ensure on NaN at the entry (`05` E2) | A unit test with `-inf` (`05` E3) |
+| ⚠ caught (review): **a size mismatch that looks like a legitimate answer.** A wrong-sized matrix returned "everyone unassigned", the same as "everything forbidden" | A squad that never gets slots, with nothing in the log | `ensureMsgf` on the size, in 64-bit arithmetic | The ensure's callstack names the caller |
+| ⚠ caught (review): **a determinism test that can't fail.** Calling a pure function twice in one process and comparing | The test passes after the tie-breaking changes | Pin the exact expected result | Change `<` to `<=` in the search: the pinned test must fail |
+| Testing only the assignment, not the returned total | A regression in the final sum passes every test | Compare the returned total with the reference too (`05` E3) | `WrongTotals` in the brute-force test |
+| Greedy claiming taken for "good enough" | Totals 2.5× the optimum on simple cases (`04` §15) | Solve exactly; keep greedy only as a measured ablation (`02` §2) | `SquadQuery.Solver.KnownOptimum` |

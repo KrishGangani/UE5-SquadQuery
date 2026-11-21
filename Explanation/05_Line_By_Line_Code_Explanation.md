@@ -8,7 +8,7 @@
 | B | S1 (arena and navigation) | `SQCoverBlock.h/.cpp`, `SQArenaSubsystem.h/.cpp`, the changed `SquadQuery.Build.cs` |
 | C | S2 (agents, director, scripts) | `SQAgent.h/.cpp`, `SQAgentBrainComponent.h/.cpp` (S2 version), `SQBenchmarkSubsystem.h/.cpp`, the changed `SquadQuery.Build.cs` and `DefaultEngine.ini`, `Tools\csv_stats.py`, `Tools\run_bench.py` |
 | D | S3 (squads, the per-agent query, baselines B0-B2) | `SquadQueryCore`: `Squad.h`, `SquadMemberComponent.h/.cpp`, `SquadQuerySubsystem.h/.cpp`, `SquadQueryContext_Threat.h/.cpp`, `SquadQueryWork.h/.cpp`, `Build.cs`; game: `SQCoverSlotGenerator.h/.cpp`, `SQQueries.h/.cpp`, `SQAgentBrainComponent` (S3 version), director, agent and arena changes; `Tools\run_bench.py`, `Tools\analyse_events.py` |
-| E | S4 onwards | written with the code |
+| E | S4 (the assignment solver) | `SquadAssignmentSolver.h/.cpp`, `Tests/SquadAssignmentSolverTests.cpp`, `Tools\run_tests.bat` |
 
 Engine references are relative to `C:\Program Files\Epic Games\UE_5.8\Engine\`, version 5.8.4.
 
@@ -717,3 +717,55 @@ S3 builds everything the three per-agent baselines need (`01` §6.2): **B0** pol
 | `decision_metrics`: queries per second, aborted queries, item tests and items generated per second (only when `eqsdebug=1`), claim failures per minute, keep checks, mean query latency (completed queries) | H1 (work), H3 (polling repeats work), H5 (claim races) need them |
 | Summary: `Queries / s`, `Item tests / s` in the cost table; `Claim failures / min` in the decision table | The numbers the baselines are compared on |
 | A `total(column)` helper and one `stat`/`metric` helper per table | The same sum and lookup were written out a dozen times (*simplify*) |
+
+---
+
+## Part E · S4: the assignment solver and its tests
+
+S4 adds the one piece of SquadQuery that needs no world: the solver that turns a squad's cost matrix into one slot per member. It is plain C++ in the plugin, so it can be tested against brute force in milliseconds (SC7). Nothing calls it yet; S5 does.
+
+### E1. `Public\SquadAssignmentSolver.h`
+
+| Line | What it does, and why |
+|---|---|
+| `struct FSquadAssignmentSolver` (no UObject) | A pure function with constants. No reflection, no garbage collector, no world: the tests construct nothing (`02` §4.1) |
+| `static constexpr float ForbiddenCost = 1.0e9f;` | A cost at or above it means "this pair may not be chosen" (a slot held by another squad, in S5) |
+| `static constexpr float UnassignedCost = 1.0e7f;` | The price of leaving an agent without a slot: higher than any real pair (centimetres, at most ~1e5) and lower than a forbidden one |
+| `static bool IsForbidden(float PairCost)` | The one rule: `>= ForbiddenCost` or not finite. `+inf` is a valid way to forbid a pair; NaN is a caller bug (`Solve` ensures). The tests use the same function (*simplify*) |
+| `static SQUADQUERYCORE_API float Solve(TConstArrayView<float> Cost, int32 NumAgents, int32 NumCandidates, TArray<int32>& OutCandidateForAgent)` | Row-major `NumAgents × NumCandidates` costs in; one candidate index (or `INDEX_NONE`) per agent out; the total of the chosen pairs returned. `TConstArrayView` takes any contiguous array without copying (`06` §28). Exported, because the game module and the tests call it |
+
+### E2. `Private\SquadAssignmentSolver.cpp`
+
+The Hungarian method in its shortest-augmenting-path form (`04` §15): agents are added one at a time; for each, a Dijkstra search over **reduced costs** (cost − row potential − column potential) finds the cheapest way to fit it in, possibly moving agents already placed, and the potentials are updated so that every reduced cost stays ≥ 0. After the last agent, the assignment is optimal. It started as a Python prototype, checked against brute force on 1,000 instances before any C++ was written; the C++ is held to the same brute force by its own tests (E3).
+
+| Line | What it does, and why |
+|---|---|
+| `OutCandidateForAgent.Init(INDEX_NONE, …)`; `N <= 0` → 0 | Always a full-length answer; no agents, no work |
+| `ensureMsgf(int64(Cost.Num()) == int64(N) * M, …)` | *Review:* a matrix of the wrong size is a caller bug, not "everything forbidden": it raises an ensure and leaves everyone unassigned. The product is computed in 64 bits, so it can't overflow into a passing check |
+| `ensureMsgf(!Cost.ContainsByPredicate(IsNaN), …)` | *Review:* a NaN (a distance from a bad location) is reported once and then treated as forbidden |
+| `Columns = M + N` | The candidates, then N "no slot" columns at `UnassignedCost`. They guarantee every agent can always be placed somewhere, so each search ends, and they make `n > m` work without a second code path |
+| `TArray<…, TInlineAllocator<160>>` ×5, `TInlineAllocator<32>` ×1 | Column potentials, minimum reduced cost, row owning each column, the search's back pointers, the visited flags, and row potentials. Inline storage holds a squad of 8 with up to ~150 candidates on the stack, so a solve normally touches no heap (*simplify*); larger inputs spill to the heap automatically (`06` §29) |
+| `double` potentials | Reduced costs are differences of large sums; double keeps centimetre costs exact |
+| Raw pointers `V`, `U`, `MinR`, `RowOf`, `Prev`, `Used`, `CostData` | In Development builds every `TArray` index is range-checked (`checkf`), and these loops run O(n²(m+n)) times inside the measured AI time. Every index is in range by construction (*simplify*) |
+| Per agent row: reset `MinR` and `Used`; `RowOf[0] = Row` | Column 0 is the virtual start of the search; it "holds" the new row |
+| Inner loop over columns: skip visited; `PairCost = Column <= M ? RowCosts[Column-1] : UnassignedCost`; **skip forbidden pairs**; relax `MinR[Column]` and remember `Prev[Column]`; track the smallest `MinR` as `Delta` / `Column1` | One Dijkstra step. A forbidden pair is a missing edge, never relaxed, so it can't end up in the answer (*simplify:* the first version gave it a huge cost, then filtered it out again at the end). The strict `<` means ties go to the lowest column, which the tests pin |
+| Potential update: visited rows `+= Delta`, visited columns `-= Delta`, others' `MinR -= Delta` | Keeps reduced costs non-negative along the tree, the invariant that makes the greedy Dijkstra choice correct |
+| `while (RowOf[Column0] != 0)` | Stop at a free column: an augmenting path has been found |
+| The second `do … while (Column0 != 0)` | Flip the path: every column on it takes the row of the column before it |
+| The readout: real columns 1..M with a row → `OutCandidateForAgent[Row - 1] = Column - 1`, `Total += Cost` | Agents left on a "no slot" column stay `INDEX_NONE`. A forbidden pair can't be here, because every assigned pair was reached through a relaxed edge |
+
+### E3. `Private\Tests\SquadAssignmentSolverTests.cpp`
+
+| Line | What it does, and why |
+|---|---|
+| `#if WITH_DEV_AUTOMATION_TESTS` | Compiled into editor and Development builds only (`06` §27) |
+| `Flags = EditorContext \| ClientContext \| ProductFilter` | Runs in the editor and in a game; exactly one filter flag, as the macro requires |
+| `Objective`, `BruteForce`, `IsFeasible` | The independent reference: the objective the solver minimises (real pairs + `UnassignedCost` per unassigned agent), every injective partial assignment by recursion over a bit mask of used candidates, and "no candidate twice, no forbidden pair". They share the solver's `IsForbidden` rule, and nothing else |
+| `SquadQuery.Solver.MatchesBruteForce` | SC7: 1,000 random instances, 1–6 agents, 0–8 candidates, about one pair in ten forbidden, integer costs 0–3,000. Counts objective mismatches, wrong returned totals (*review:* the returned total must equal the objective minus the padding of the unassigned agents) and infeasible answers, and requires all three to be 0. Counting instead of asserting per trial keeps a failure to three readable lines |
+| `SquadQuery.Solver.KnownOptimum` | The case the solver exists for: greedy order-based claiming gives 10, the optimum is 4 (`02` §2) |
+| `SquadQuery.Solver.EdgeCases` | No agents; no candidates; more agents than candidates (the cheapest gets the only slot); everything forbidden; a forbidden pair avoided although it is the agent's only cheap option; **ties pinned to `{0, 1, 2}`** (*review:* comparing two calls in one process proved nothing); `+inf` never chosen |
+| `SquadQuery.Solver.Timing8x128` | 2,000 solves of 8 × 128 random costs, reported with `AddInfo`. An order of magnitude from the Development editor; the packaged runs time every solve (S5, SC7) |
+
+### E4. `Tools\run_tests.bat`
+
+Copied from UE5-UpdateBudget and renamed: runs `UnrealEditor-Cmd SquadQuery.uproject -ExecCmds="Automation RunTests <Filter>;Quit" -unattended -nullrhi -nosound -nosplash -nopause` with the default filter `SquadQuery` (every test of this project), writes `Saved\Logs\Tests.log` and a report under `Saved\Automation\Reports`, and returns the editor's exit code (non-zero on a failure).

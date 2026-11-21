@@ -163,3 +163,29 @@ for (const SQBench::FModeName& Entry : SQBench::Modes) { if (Mode == Entry.Name)
 - One table serves both directions: parsing a name, and listing the valid names in an error message, so the two can't disagree.
 - A `TMap` would be overkill for four entries; a linear scan of a tiny array is faster than hashing and needs no construction.
 - **In our code:** the `-SQMode=` names in `SQBenchmarkSubsystem.cpp` (`05` D7).
+
+## 15. The assignment problem and the Hungarian method, in plain steps
+
+```text
+cost   slot A  slot B          greedy, agent order 1, 2:   1 -> A (1),  2 -> B (9)   total 10
+agent 1   1      2             optimal:                    1 -> B (2),  2 -> A (2)   total 4
+agent 2   2      9
+```
+- **The problem.** n agents, m slots, a cost for every pair. Give each agent at most one slot and each slot at most one agent, so the total cost is smallest. Choosing agent by agent ("greedy") depends on the order and can be far from optimal, as above.
+- **The idea (shortest augmenting path).** Add agents one at a time. For the new agent, search for the cheapest way to make room: take a free slot, or take a slot from an agent who then moves to another, and so on, along a chain that ends at a free slot. That chain is an *augmenting path*; flipping it places one more agent.
+- **Why the search is a shortest-path search.** Each row and column carries a number, its *potential*. Measured in *reduced cost* (cost − row potential − column potential), every edge is ≥ 0, so Dijkstra's algorithm finds the cheapest chain. After each step the potentials are adjusted so that this stays true. When every agent is placed, no cheaper assignment exists.
+- **Cost.** O(n² · (m + n)) for n agents and m slots: for 8 agents and 128 slots (plus 8 "no slot" columns), at most 8 × 8 × 136 ≈ 8,700 steps of the inner loop, a few microseconds.
+- **The two tricks used here.** "No slot" columns at a high fixed price, so an agent can always be left unassigned instead of the search failing. And forbidden pairs as missing edges, never relaxed, so they can never appear in the answer.
+- **In our code:** `FSquadAssignmentSolver::Solve` (`05` E2), and its Python prototype, checked against brute force before the C++ existed.
+
+## 16. Raw pointers over a container, on purpose
+
+```cpp
+TArray<double, TInlineAllocator<160>> MinReduced;  MinReduced.SetNumUninitialized(Columns + 1);
+double* const MinR = MinReduced.GetData();         // the container still owns the memory
+for (int32 Column = 0; Column <= Columns; ++Column) { MinR[Column] = TNumericLimits<double>::Max(); }
+```
+- `Array[i]` on a `TArray` checks that `i` is in range, in every Development build. That is what you want almost everywhere.
+- In a tight loop that runs hundreds of thousands of times per call, and whose indices are in range by construction, the checks are measurable. Taking the raw pointer once (`GetData()`) removes them for that loop only.
+- The container still owns the memory. The pointer is valid until the array is resized, which this function never does after taking it.
+- **In our code:** only in the solver's inner loops (`05` E2).

@@ -33,6 +33,9 @@
 | 24 | Smart Object claims: `CanBeClaimed`, `MarkSlotAsClaimed`, `MarkSlotAsFree` | S3 |
 | 25 | Tick intervals and the first tick | S3 |
 | 26 | `TWeakObjectPtr`, `TOptional` | S3 |
+| 27 | Automation tests: `IMPLEMENT_SIMPLE_AUTOMATION_TEST`, flags, `TestEqual`, `AddInfo` | S4 |
+| 28 | `TConstArrayView`, `ensureMsgf` | S4 |
+| 29 | `TInlineAllocator` | S4 |
 
 Entries 6–15 entered with S1 (the arena). EQS, AI controllers and the CSV profiler enter with S2 and S3.
 
@@ -373,3 +376,36 @@ Entries 6–15 entered with S1 (the arena). EQS, AI controllers and the CSV prof
 6. **Common mistakes.** Storing a raw pointer to another object's UObject (dangles after destruction); a separate `bool` flag next to a value that means "value set" (use `TOptional`).
 7. **Example.** `TWeakObjectPtr<const USquad> Squad; if (const USquad* S = Squad.Get()) { … }`
 8. **In this project.** The brain caches its squad (`TWeakObjectPtr<const USquad>`) and its pending first-poll delay (`TOptional<float>`).
+
+## 27. Automation tests: `IMPLEMENT_SIMPLE_AUTOMATION_TEST`, `EAutomationTestFlags`, `TestEqual`, `AddInfo`
+
+1. **What it is.** The engine's unit-test framework: a macro declares a test class with a dotted name and flags, and its `RunTest` reports results through `TestEqual`, `TestTrue`, `TestNotEqual`, `AddInfo`, `AddError`.
+2. **Why it exists.** Tests that run headless in the editor or a game, from the command line or the Session Frontend.
+3. **How it works.** `IMPLEMENT_SIMPLE_AUTOMATION_TEST(FClass, "Group.Name", Flags)` (`Core/Public/Misc/AutomationTest.h`) registers the test. The flags combine contexts (`EditorContext`, `ClientContext`, …) with exactly one filter (`ProductFilter`, `EngineFilter`, …). `UnrealEditor-Cmd Project.uproject -ExecCmds="Automation RunTests Group;Quit" -unattended -nullrhi` runs every test whose name starts with `Group` and exits non-zero if one fails. Test code sits inside `#if WITH_DEV_AUTOMATION_TESTS`.
+4. **When to use it.** Pure logic (a solver, a parser) and small world-level checks.
+5. **When not to.** Performance numbers: the editor is not the shipped build (report timings with `AddInfo` as orders of magnitude only).
+6. **Common mistakes.** Two filter flags, or none; asserting inside a 1,000-iteration loop (1,000 error lines); a "determinism" test that compares two calls in one process (it proves nothing; pin the expected answer).
+7. **Example.** `IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMyTest, "MyGame.Solver.Basics", EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter) bool FMyTest::RunTest(const FString&) { TestEqual(TEXT("sum"), 1 + 1, 2); return true; }`
+8. **In this project.** `SquadQuery.Solver.*` (`05` E3), run by `Tools\run_tests.bat`.
+
+## 28. Views and checks: `TConstArrayView`, `ensureMsgf`
+
+1. **What it is.** `TConstArrayView<T>`: a pointer and a length over someone else's contiguous elements, read-only. `ensureMsgf(Condition, Format, …)`: report a broken assumption (once per call site, with a callstack in the log) and carry on.
+2. **Why it exists.** Functions that read arrays without caring how they were stored; recoverable caller bugs that must not crash.
+3. **How it works.** A view converts implicitly from a `TArray`, an initializer list or a C array; `Num()`, `GetData()`, `ContainsByPredicate`. `ensureMsgf` returns the condition, so it can guard an early return.
+4. **When to use it.** Read-only array parameters; input validation at a library boundary.
+5. **When not to.** Storing a view beyond the caller's array lifetime; `ensure` for conditions that are normal at run time (it logs an error).
+6. **Common mistakes.** Keeping a view to a temporary; computing `rows × columns` in 32 bits for a size check.
+7. **Example.** `if (!ensureMsgf(int64(Cost.Num()) == int64(N) * M, TEXT("bad size"))) { return 0.f; }`
+8. **In this project.** `FSquadAssignmentSolver::Solve` takes the cost matrix as a view and ensures its size (`05` E2).
+
+## 29. `TInlineAllocator`
+
+1. **What it is.** An allocator for `TArray` that keeps the first N elements inside the array object itself (on the stack, for a local array) and moves to the heap only beyond N.
+2. **Why it exists.** Small, short-lived arrays without a heap allocation.
+3. **How it works.** `TArray<double, TInlineAllocator<160>> A;` — the array object is 160 doubles larger; `Init`, `Add` and indexing work as usual.
+4. **When to use it.** Per-call scratch arrays of a predictable size on a hot path.
+5. **When not to.** Large N on deep call stacks; arrays stored in many objects (every object pays for the inline storage).
+6. **Common mistakes.** An inline size far larger than ever needed (stack waste) or far smaller (no benefit).
+7. **Example.** `TArray<int32, TInlineAllocator<16>> Members;`
+8. **In this project.** The solver's six scratch arrays (`05` E2); the squad's member lists in S5.

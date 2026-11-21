@@ -4,11 +4,11 @@
 
 **Domain:** AI decision-making at scale · **Difficulty:** ★★★½☆ · **Engine:** UE 5.8.4
 
-> **Status: in progress. There are no results yet.** Phases 1–4 are done: problem analysis, verified research, the final architecture, and the UE project skeleton (built and packaged with 0 errors and 0 warnings). Sections marked *(pending)* are filled in only from real measurements, in the phase named. The success criteria are **targets fixed before any code exists, not results**.
+> **Status: closed at step S4 of 8 (2026-11-21), by the owner's decision.** Built and measured: the runtime arena (packaged-build proof), the benchmark harness, the **three per-agent baselines B0, B1, B2** (captured at 8 / 32 / 128 agents, 3 runs each) and the **exact assignment solver** (tested against brute force). **Not built into the game: SquadQuery's shared squad evaluation (S5)**, so the comparison it was designed for (SC1–SC6) is **not measured**. Every number below comes from a packaged Development run or a unit test; nothing is estimated.
 
-| Phase | 1 Problem | 2 Research | 3 Architecture | 4 Foundation | 5 Implementation | 6 Explanation | 7 Testing | 8 Profiling | 9 Review | 10 Portfolio |
-|---|---|---|---|---|---|---|---|---|---|---|
-| State | ✓ | ✓ | ✓ final | ✓ | next (S1 of 8) | ongoing | — | — | — | — |
+| Phase | 1 Problem | 2 Research | 3 Architecture | 4 Foundation | 5 Implementation | 6–10 |
+|---|---|---|---|---|---|---|
+| State | ✓ | ✓ | ✓ final | ✓ | S1–S4 ✓; S5–S8 not built | docs for S1–S4; 10, 12 written |
 
 ---
 
@@ -38,17 +38,49 @@ Final (v1.0): [Explanation/02_System_Architecture.md](Explanation/02_System_Arch
 
 Mean and p99 AI ms per frame at 8 / 32 / 128 agents; item tests per second; assignment conflicts per minute (**target 0**); decision switches per agent per threat event (target ≤ 1, no oscillations); time-to-cover after a threat (p95 no worse than the best baseline, ≥ 95% in cover by the next event); solver correctness against brute force. The exact thresholds are SC1–SC7 in [01_Problem_Analysis.md §6.4](Explanation/01_Problem_Analysis.md).
 
-## Before / after comparison
+## Results: the per-agent baselines (measured)
 
-*(pending, Phase 8)*. Four configurations on one seeded arena: B0, B1, B2, SQ.
+Packaged Development build, fixed 60 Hz step, 1280 × 720 on the GPU, every run pinned to the performance cores, 60 s captures with a threat event every 6 s. Medians of 3 interleaved runs; ranges and every other column in [Benchmarks/Summaries/2026-11-21_085156_S3baseline_summary.md](Benchmarks/Summaries/2026-11-21_085156_S3baseline_summary.md) and [`…_events.md`](Benchmarks/Summaries/2026-11-21_085156_S3baseline_events.md). AI time = EQS + decision code + path queries, per frame.
 
-## Benchmark results
+| N = 128 | AI mean (ms) | AI p99 | AI max | Item tests / s | Conflicts / min | Claim failures / min | In cover by next event |
+|---|---|---|---|---|---|---|---|
+| **B0** polled EQS | 0.426 | 1.13 | 1.70 | 21,395 | 160 | 0 | 67% |
+| **B1** polled + claims | 0.380 | 0.83 | 1.49 | 16,626 | 0 | 5 | 97% |
+| **B2** event-driven + claims | 0.026 | 0.05 | **8.35** | 1,477 | 0 | 151 | 96% |
 
-*(pending, Phase 8)*. Packaged Development build, fixed step, every run pinned to the performance cores. Raw data and the run log: [Benchmarks/](Benchmarks/README.md).
+```mermaid
+xychart-beta
+    title "Mean AI time per frame (ms) vs agents"
+    x-axis "Agents" [8, 32, 128]
+    y-axis "ms per frame" 0 --> 0.5
+    line [0.034, 0.132, 0.426]
+    line [0.034, 0.127, 0.380]
+    line [0.002, 0.007, 0.026]
+```
+*Lines, top to bottom: B0 (polled), B1 (polled + claims), B2 (event-driven + claims).*
+
+```mermaid
+xychart-beta
+    title "B2 at 128 agents: the frame percentile hides the event frames (ms)"
+    x-axis ["mean", "p99", "p99.9", "max"]
+    y-axis "AI ms per frame" 0 --> 9
+    bar [0.026, 0.050, 7.395, 8.347]
+```
+
+**What the baselines show** ([09 §S3](Explanation/09_Testing_And_Benchmarks.md)):
+- **Polling repeats work** (H3): at 128 agents B0 costs 16× B2's mean AI time and 14× its item tests, with worse cover.
+- **Independent choices collide** (H4), faster than N grows: B0 has 9, 43 and 160 conflict onsets per minute at 8, 32 and 128 agents.
+- **Claims remove conflicts but not their cost** (H5): B2 loses 151 claims per minute, because every agent queries on the same frame.
+- **Event-driven work bunches** (H6): B2's event frames reach 8.35 ms while its p99 is 0.05 ms. Event frames are under 1% of a capture, so p99 alone would pass it.
+- **No EQS queueing at these loads** (H7): every query finished in the frame it started.
+
+**The solver** ([09 §S4](Explanation/09_Testing_And_Benchmarks.md)): `FSquadAssignmentSolver` (Hungarian method, shortest augmenting path) equals brute force on 1,000 random instances, never chooses a forbidden pair, handles more agents than slots, and solves 8 × 128 in 6.92 µs (mean, Development editor).
+
+**Not measured:** SquadQuery itself (SC1–SC6) and the packaged solve-time p99 (SC7's speed half). The bar it would have to clear is B2: 0.026 ms mean at 128 agents, with conflicts already at 0.
 
 ## Recorded demonstration
 
-*(pending, Phase 10)*. B0 vs SQ on the same seed, with slot markers, target lines and a live AI-time graph. Saved in `Media/`.
+None (not made for this project).
 
 ## Main Unreal Engine technologies
 
@@ -64,7 +96,7 @@ The UE project is in [SquadQuery/](SquadQuery/) (UE 5.8.4, C++):
 - the reusable system is the plugin `SquadQueryCore`;
 - the arena, agents, baselines and benchmark are in the game module `SquadQuery`.
 
-Phase 4 contains the skeleton only (descriptors, targets, modules, config). The classes are designed in [02 §4](Explanation/02_System_Architecture.md) and written step by step from S1 ([03](Explanation/03_Implementation_Roadmap.md)).
+Built: the arena (`USQArenaSubsystem`, `ASQCoverBlock`), agents and brains with B0/B1/B2 (`ASQAgent`, `USQAgentBrainComponent`), the benchmark director (`USQBenchmarkSubsystem`), the cover query (`SQQueries`, `USQCoverSlotGenerator`), the squad registry and threat context (`USquadQuerySubsystem`, `USquadQueryContext_Threat`) and the solver (`FSquadAssignmentSolver`) with its automation tests. The design of the rest is in [02 §4](Explanation/02_System_Architecture.md); the build order and where it stopped in [03](Explanation/03_Implementation_Roadmap.md).
 
 ## Documentation
 
@@ -75,9 +107,9 @@ Phase 4 contains the skeleton only (descriptors, targets, modules, config). The 
 | [01b_Research_Findings](Explanation/01b_Research_Findings.md) | Phase 2: verified engine behaviour (UE 5.8.4), existing work, and what it changed in the design |
 | [02_System_Architecture](Explanation/02_System_Architecture.md) | Final v1.0: modules, classes, data flow, defaults, safety rules, rejected alternatives |
 | [03_Implementation_Roadmap](Explanation/03_Implementation_Roadmap.md) | Small, ordered build steps; baselines captured before SquadQuery code |
-| [04](Explanation/04_CPP_Fundamentals.md) · [05](Explanation/05_Line_By_Line_Code_Explanation.md) · [06](Explanation/06_Unreal_APIs_And_Macros.md) · [07](Explanation/07_Common_Mistakes.md) | C++ fundamentals, line-by-line code, APIs and macros, common mistakes. Written with the code (current to Phase 4) |
-| [09](Explanation/09_Testing_And_Benchmarks.md) | Every check so far, with its command and result |
-| [08](Explanation/08_Debugging_And_Profiling.md) · [10](Explanation/10_Interview_Questions.md) · [11](Explanation/11_Optimization_Decisions.md) · [12](Explanation/12_Future_Scalability.md) | Debugging and profiling, interview questions, optimisation decisions, future scalability. Filled in during Phases 7–10 |
+| [04](Explanation/04_CPP_Fundamentals.md) · [05](Explanation/05_Line_By_Line_Code_Explanation.md) · [06](Explanation/06_Unreal_APIs_And_Macros.md) · [07](Explanation/07_Common_Mistakes.md) | C++ fundamentals, line-by-line code, APIs and macros, common mistakes. Written with the code, current to S4 |
+| [09](Explanation/09_Testing_And_Benchmarks.md) | Every check, with its command and result; the SC1–SC7 table |
+| [08](Explanation/08_Debugging_And_Profiling.md) · [10](Explanation/10_Interview_Questions.md) · [11](Explanation/11_Optimization_Decisions.md) · [12](Explanation/12_Future_Scalability.md) | Debugging and profiling (as of S3), interview questions, optimisation decisions (not written), future scalability |
 | [Phase2_Raw_Notes/](Explanation/Phase2_Raw_Notes/README.md) | The Phase 2 audit trail: every engine line and web page behind `01b` |
 | [Research/](Explanation/Research/) | The portfolio-wide research this project draws on: job market, technical challenges, existing solutions, local engine verification |
 
@@ -88,7 +120,6 @@ P07_SquadQuery\
 ├── README.md        ← this page (the project's portfolio page)
 ├── Explanation\     ← 00–12, Phase 2 raw notes, research copies
 ├── Benchmarks\      ← run protocol + Raw\ + Summaries\
-├── Media\           ← diagrams, screenshots, demo video
 ├── Tools\           ← build, package, smoke; analysis and run scripts
 └── SquadQuery\      ← the Unreal Engine project
 ```
