@@ -10,6 +10,7 @@
 
 class ANavigationData;
 class ASQCoverBlock;
+struct FCollisionQueryParams;
 class USmartObjectDefinition;
 
 /** One cover slot of the arena, in a flat table that every configuration and the metrics share. Plain C++ (no
@@ -59,6 +60,13 @@ public:
 	FSimpleMulticastDelegate OnArenaReady;
 
 	const TArray<FSQCoverSlot>& GetSlots() const { return Slots; }
+
+	/** The table index of a Smart Object slot, or INDEX_NONE (also for an invalid handle). One hash lookup. */
+	int32 FindSlotIndex(const FSmartObjectSlotHandle& Handle) const
+	{
+		const int32* Found = SlotIndexByHandle.Find(Handle);
+		return Found ? *Found : INDEX_NONE;
+	}
 	const TArray<FVector>& GetThreatPositions() const { return ThreatPositions; }
 
 	/** True if a Visibility trace from the threat's eye to the slot is blocked. False before the arena is ready. */
@@ -74,9 +82,17 @@ public:
 	 */
 	bool IsValidCover(int32 ThreatIndex, int32 SlotIndex) const
 	{
-		return IsSlotHidden(ThreatIndex, SlotIndex)
-			&& FVector::DistSquared2D(ThreatPositions[ThreatIndex], Slots[SlotIndex].Location) >= FMath::Square(MinThreatDistanceCm);
+		return IsSlotHidden(ThreatIndex, SlotIndex) && IsFarFromThreat(ThreatPositions[ThreatIndex], Slots[SlotIndex].Location);
 	}
+
+	/** The cover rule's two parts, for floor-level positions. The visibility table, IsValidCover and the baselines'
+	 *  keep-current check all use these, so heights, channel and distance can't drift apart. */
+	static bool IsFarFromThreat(const FVector& ThreatFloor, const FVector& SlotFloor)
+	{
+		return FVector::DistSquared2D(ThreatFloor, SlotFloor) >= FMath::Square(MinThreatDistanceCm);
+	}
+	/** One Visibility trace from the threat's eye to the slot at chest height: true if something blocks it (hidden). */
+	static bool TraceHidden(const UWorld& World, const FVector& ThreatFloor, const FVector& SlotFloor, const FCollisionQueryParams& Params);
 
 	int32 GetSeed() const { return Seed; }
 
@@ -124,6 +140,7 @@ private:
 	TArray<TObjectPtr<ASQCoverBlock>> Blocks;
 
 	TArray<FSQCoverSlot> Slots;
+	TMap<FSmartObjectSlotHandle, int32> SlotIndexByHandle;   // filled with the handles, once ready
 	TArray<FVector> ThreatPositions;
 
 	/** Row-major: ThreatIndex * Slots.Num() + SlotIndex. */

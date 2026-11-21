@@ -28,6 +28,11 @@
 | 19 | Files and paths: `FFileHelper::SaveStringToFile`, `FPaths::ProjectSavedDir` | S2 |
 | 20 | View targets and class defaults: `ACameraActor`, `SetViewTarget`, `bAutoManageActiveCameraTarget`, `GetDefault<T>()` | S2 |
 | 21 | Game modes: `AGameModeBase`, `DefaultPawnClass`, `GlobalDefaultGameMode` | S2 |
+| 22 | EQS from C++: queries, options, generators, tests, contexts | S3 |
+| 23 | Running queries: `PrepareQueryInstance`, `RunQuery`, `AbortQuery`, EQS debug data | S3 |
+| 24 | Smart Object claims: `CanBeClaimed`, `MarkSlotAsClaimed`, `MarkSlotAsFree` | S3 |
+| 25 | Tick intervals and the first tick | S3 |
+| 26 | `TWeakObjectPtr`, `TOptional` | S3 |
 
 Entries 6–15 entered with S1 (the arena). EQS, AI controllers and the CSV profiler enter with S2 and S3.
 
@@ -313,3 +318,58 @@ Entries 6–15 entered with S1 (the arena). EQS, AI controllers and the CSV prof
 6. **Common mistakes.** Expecting `DefaultPawnClass=` in an ini file to work (not config); forgetting that a map's world settings can override the global game mode (check the `LogLoad: Game class is '…'` line).
 7. **Example.** `AMyGameMode::AMyGameMode() { DefaultPawnClass = nullptr; }` and `GlobalDefaultGameMode=/Script/MyGame.MyGameMode`.
 8. **In this project.** `ASQGameMode` gives the player no pawn, so no `ADefaultPawn` collides with agents at the template map's `PlayerStart` and nothing takes the view target back (`05` C2b).
+
+## 22. EQS from C++: `UEnvQuery`, `UEnvQueryOption`, generators, tests, contexts
+
+1. **What it is.** An EQS query is a `UEnvQuery` holding options (`UEnvQueryOption`), each with one generator (makes candidate items) and a list of tests (filter and/or score them). A context (`UEnvQueryContext`) supplies points or actors the tests measure against.
+2. **Why it exists.** Designers author spatial reasoning ("find a hidden spot near me") as data, and the engine runs it time-sliced across all AI.
+3. **How it works.** A query can be built in code: `NewObject<UEnvQuery>`, `NewObject<UEnvQueryOption>(Query)`, `Option->Generator = …`, `Option->Tests.Add(…)`, `Query->GetOptionsMutable().Add(Option)` (`AIModule/Classes/EnvironmentQuery/EnvQuery.h:66`). Tests have public settings (`UEnvQueryTest_Trace::TraceData`, `Context`, `TraceFromContext`, `ContextHeightOffset`, `ItemHeightOffset`; `UEnvQueryTest_Distance::TestMode`, `DistanceTo`; `TestPurpose`, `FilterType`, `BoolValue`, `FloatValueMin`, `ScoringEquation` on the base). The manager caches the query **template** per name and run mode, not its results (`01b` #4). A context overrides `ProvideContext(FEnvQueryInstance&, FEnvQueryContextData&)` and fills the data with `UEnvQueryItemType_Point::SetContextHelper`.
+4. **When to use it.** Reviewable, fixed benchmark queries; queries generated from game data.
+5. **When not to.** Queries designers must tune: author them as assets.
+6. **Common mistakes.** Forgetting `TestOrder` (the manager rebuilds the order only if the last test's order is 0, `EnvQueryManager.cpp:874-884`); expecting `SingleResult` to evaluate every item (it moves the most expensive filter last and stops at the first pass, `01b` #3); a context that returns nothing when its input is missing, silently failing every test.
+7. **Example.** `UEnvQueryTest_Distance* T = NewObject<UEnvQueryTest_Distance>(Option); T->DistanceTo = UMyContext::StaticClass(); T->TestPurpose = EEnvTestPurpose::Filter; T->FilterType = EEnvTestFilterType::Minimum; T->FloatValueMin.DefaultValue = 800.f;`
+8. **In this project.** `SQQueries::MakeAgentCoverQuery` (two filters and a distance score) and, from S5, the squad query; `USquadQueryContext_Threat` gives the threat; `USQCoverSlotGenerator` lists Smart Object slots.
+
+## 23. Running queries: `PrepareQueryInstance`, `RunQuery`, `AbortQuery`, `SilentlyRemoveAllQueriesByQuerier`, EQS debug data
+
+1. **What it is.** The calls that start, stop and inspect queries on the world's `UEnvQueryManager`.
+2. **Why it exists.** Queries are owned by a UObject and run over several frames; their owner must be able to cancel them and read what they did.
+3. **How it works.** `FEnvQueryRequest(Query, Owner).Execute(Mode, Delegate)` is `PrepareQueryInstance` + `RunQuery` (`EnvQueryManager.cpp:282-286`); calling the two directly keeps the `TSharedPtr<FEnvQueryInstance>`, whose `QueryID` identifies it. The manager steps all queries breadth first within a 10 ms budget per frame (`01b` #2) and calls the finish delegate (`FQueryFinishedSignature`, one `TSharedPtr<FEnvQueryResult>` parameter) when a query completes, fails or is aborted; `AbortQuery(Id)` calls it at once (`:408-428`). `SilentlyRemoveAllQueriesByQuerier(Owner)` drops an owner's queries without calling anything. With `USE_EQS_DEBUGGER` (every build but Test and Shipping, `EnvQueryTypes.h:33`), the instance's `DebugData` records the items each step processed.
+4. **When to use it.** Whenever you need the instance after it finishes, or must cancel a query on an event.
+5. **When not to.** Fire-and-forget queries: `Execute` is simpler.
+6. **Common mistakes.** Creating the finish delegate for every query (one heap allocation each; keep it as a member, as the engine's own Behavior Tree nodes do, `BTTask_RunEQSQuery.cpp:29`); not removing an owner's queries in `EndPlay`; mixing aborted queries into latency figures; forgetting that the **EQS debugger's own bookkeeping runs on every finished query** in Development builds (`01b` #22).
+7. **Example.** `auto Instance = Manager->PrepareQueryInstance(FEnvQueryRequest(Query, Owner), EEnvQueryRunMode::SingleResult); Manager->RunQuery(Instance, MyDelegate);`
+8. **In this project.** The brain's `StartQuery` / `AbortQuery` / `OnQueryFinished`, and `FSquadQueryWork` reading `DebugData` for item tests.
+
+## 24. Smart Object claims: `CanBeClaimed`, `MarkSlotAsClaimed`, `MarkSlotAsFree`, claim handles
+
+1. **What it is.** Reserving a slot: `MarkSlotAsClaimed(SlotHandle, Priority)` returns an `FSmartObjectClaimHandle` (invalid on failure); `MarkSlotAsFree(ClaimHandle)` releases it; `CanBeClaimed(SlotHandle, Priority)` asks first (`SO/Public/SmartObjectSubsystem.h:622, 631, 684`).
+2. **Why it exists.** Exclusive use of interaction points by many agents.
+3. **How it works.** A slot is claimable if free, or claimed at a lower priority; the first claim wins (`01b` #7). The EQS generator lists only slots claimable at generation time and the request filter skips claimed slots (`01b` #8, #18), so the claim, made frames later, can fail.
+4. **When to use it.** Whenever two agents must not use the same slot.
+5. **When not to.** Points nobody reserves.
+6. **Common mistakes.** Not releasing a claim when the holder goes away; claiming before freeing your own old slot when swapping; treating a failed claim as an error instead of a race to retry; using the deprecated `Release` alias (`01b` #7).
+7. **Example.** `FSmartObjectClaimHandle C = SO->MarkSlotAsClaimed(Slot, ESmartObjectClaimPriority::Normal); if (!C.IsValid()) { RetryNextFrame(); }`
+8. **In this project.** B1 and B2 claim the slot their query picked and retry next frame on failure; from S5 the squad subsystem claims for its members.
+
+## 25. Tick intervals: `SetComponentTickEnabled`, `SetComponentTickInterval`, `SetComponentTickIntervalAndCooldown`
+
+1. **What it is.** A component's tick can be enabled and given an interval (seconds between ticks) instead of running every frame.
+2. **Why it exists.** Periodic AI (a Behavior Tree service, a poll) without a per-frame cost.
+3. **How it works.** An enabled tick function joins the enabled list and **runs on the next frame, whatever its interval** (`Engine/Private/TickTaskManager.cpp:1681-1691`); after each tick it is rescheduled with its current `TickInterval`. `SetComponentTickIntervalAndCooldown` reschedules an already-interval tick, but does nothing to the cooldown before the first tick (`:2463-2477`, `bWasInterval`).
+4. **When to use it.** Anything that should run every N seconds.
+5. **When not to.** Work that must happen at a fixed point in the frame relative to other ticks (use tick groups and prerequisites).
+6. **Common mistakes.** Expecting a cooldown set before the first tick to delay that tick, so many agents tick in step on their first frame; changing the interval and expecting it to apply to the tick already scheduled.
+7. **Example.** In the first `TickComponent`: `SetComponentTickInterval(SeededDelay); return;`, then the normal interval from the next tick on.
+8. **In this project.** B0 and B1 poll every 0.5 s ± 0.1 s with a seeded first delay applied by the first tick (`05` D6).
+
+## 26. `TWeakObjectPtr` and `TOptional`
+
+1. **What it is.** `TWeakObjectPtr<T>`: a pointer to a UObject that becomes null when the object is destroyed, without keeping it alive. `TOptional<T>`: a value that may be absent.
+2. **Why it exists.** Caching another object's pointer without owning it; "not set yet" without a magic value.
+3. **How it works.** `Weak.Get()` returns the object or null; `Optional.IsSet()`, `GetValue()`, `Reset()`.
+4. **When to use it.** A cache of something another system owns; a one-time pending value.
+5. **When not to.** An object you must keep alive (`UPROPERTY` `TObjectPtr`); hot loops that call `Get()` many times (resolve once into a local).
+6. **Common mistakes.** Storing a raw pointer to another object's UObject (dangles after destruction); a separate `bool` flag next to a value that means "value set" (use `TOptional`).
+7. **Example.** `TWeakObjectPtr<const USquad> Squad; if (const USquad* S = Squad.Get()) { … }`
+8. **In this project.** The brain caches its squad (`TWeakObjectPtr<const USquad>`) and its pending first-poll delay (`TOptional<float>`).

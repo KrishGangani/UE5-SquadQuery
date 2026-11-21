@@ -6,6 +6,7 @@
 #include "SQAgent.generated.h"
 
 class USQAgentBrainComponent;
+class USquadMemberComponent;
 class UStaticMeshComponent;
 
 /**
@@ -22,6 +23,7 @@ public:
 	ASQAgent();
 
 	USQAgentBrainComponent* GetBrain() const { return Brain; }
+	USquadMemberComponent* GetSquadMember() const { return SquadMember; }
 
 	/** Walking speed (cm/s): a jog. Time-to-cover depends on it, so it is fixed for every configuration. */
 	static constexpr float WalkSpeedCmPerSecond = 450.f;
@@ -33,4 +35,8 @@ private:
 
 	UPROPERTY(VisibleAnywhere, Category = "Agent")
 	TObjectPtr<USQAgentBrainComponent> Brain;
+
+	/** Its squad membership (SquadQueryCore). Every configuration has it: the baselines read their threat through it. */
+	UPROPERTY(VisibleAnywhere, Category = "Agent")
+	TObjectPtr<USquadMemberComponent> SquadMember;
 };

@@ -131,3 +131,35 @@ Game target   (SquadQuery.exe, packaged):     /fp:fast      seed 1 -> arena hash
 - UE 5.8 picks the mode per target type: `/fp:precise` for the editor, `/fp:fast` for the game (`01b` #21). So the editor binary running `-game` and the packaged game can produce numbers that differ in the last bit from identical source and identical random numbers.
 - A hash of the raw bytes sees that difference; a human-level property (how many slots are hidden, whether paths exist) doesn't.
 - **In our code:** the arena hash proves repeatability **within** one binary (two runs, same hash). Every measured run uses the packaged build, so comparisons never cross the two modes.
+
+## 13. Shared ownership: `TSharedPtr`
+
+```cpp
+TSharedPtr<FEnvQueryInstance> RunningQuery = Manager->PrepareQueryInstance(Request, EEnvQueryRunMode::SingleResult);
+Manager->RunQuery(RunningQuery, QueryFinishedDelegate);   // the manager keeps its own TSharedPtr to the same instance
+// … later, when the query has finished:
+RunningQuery.Reset();                                      // our reference goes; the instance lives while the manager holds one
+```
+- A `TSharedPtr<T>` counts how many owners an object has and deletes it when the last one lets go. It is for plain C++ objects (not UObjects, which the garbage collector owns).
+- Here two systems hold the same query instance: the EQS manager, which steps it, and the brain, which reads its debug data when it finishes. Neither has to know when the other is done.
+- `Reset()` drops one owner; `IsValid()` asks whether this pointer still points at something. `TSharedRef` is the never-null variant.
+- **In our code:** `USQAgentBrainComponent::RunningQuery` (S3) and, from S5, the squad's running query.
+
+## 14. Constant lookup tables
+
+```cpp
+namespace SQBench
+{
+	struct FModeName { const TCHAR* Name; ESQBrainMode Mode; };
+	constexpr FModeName Modes[] = {
+		{ TEXT("Scripted"), ESQBrainMode::Scripted },
+		{ TEXT("B0"), ESQBrainMode::PolledEQS },
+		// …
+	};
+}
+for (const SQBench::FModeName& Entry : SQBench::Modes) { if (Mode == Entry.Name) { … } }
+```
+- A small array of plain structs, built entirely at compile time (`constexpr`): string literals and enum values are compile-time constants. Nothing is allocated or initialised at run time.
+- One table serves both directions: parsing a name, and listing the valid names in an error message, so the two can't disagree.
+- A `TMap` would be overkill for four entries; a linear scan of a tiny array is faster than hashing and needs no construction.
+- **In our code:** the `-SQMode=` names in `SQBenchmarkSubsystem.cpp` (`05` D7).

@@ -96,7 +96,7 @@ D:\UNREAL PORTFOLIO\P07_SquadQuery\Tools\                    ← build/package/s
 | `ASQCoverBlock` | `AActor` | An unscaled root, a cube mesh scaled on its own component to 3.0 × 1.0 × 1.3 m (`BlockAll`), and a `USmartObjectComponent`. The root stays unscaled because slot offsets are relative to the actor (S1). Spawned deferred so the definition is set before `BeginPlay` registers it (`01b` #11) |
 | `USQCoverBehaviorDefinition` | `USmartObjectBehaviorDefinition` | *Added in S1.* An empty behavior type for cover slots. A Smart Object definition is valid only if every slot has a behavior definition (`01b` #19); without it no block would register |
 | `ASQAgent` | `ACharacter` | Capsule, character movement (450 cm/s, RVO avoidance since S2), a cylinder mesh for visibility, a `USquadMemberComponent` and a `USQAgentBrainComponent`. Possessed by a plain `AAIController` |
-| `USQAgentBrainComponent` | `UActorComponent` | The decision logic in four modes (§9): **B0** polled per-agent query; **B1** + claims; **B2** event-driven + claims; **SQ** follows `OnAssignmentChanged`. Every mode ends in the same "set target" function, which owns the switch counter, the claim and `MoveToLocation` |
+| `USQAgentBrainComponent` | `UActorComponent` | The decision logic in four modes (§9): **B0** polled per-agent query; **B1** + claims; **B2** event-driven + claims; **SQ** follows `OnAssignmentChanged`. Every mode ends in the same "set target" function, which owns the switch counter and `MoveToLocation`; B1/B2 claim in the query handler just before it (S3) |
 | `USQCoverSlotGenerator` | `UEnvQueryGenerator_SmartObjects` | Sets the engine generator's protected settings (origin context, box half-extent, `bOnlyClaimable`) from code (`01b` #17). Every query in every configuration uses it, so the item source is identical |
 | `SQQueries` | free functions (`SQQueries.h/.cpp`) | Build the two `UEnvQuery` templates in C++ (§7). *Rejected:* assets, which would be binary, unreviewable in a diff, and easy to drift between configurations |
 | `USQBenchmarkSubsystem` | `UTickableWorldSubsystem` (Game/PIE) | The director: reads `-SQ…=` values; spawns squads from the seed once navigation is ready; runs the threat timeline; fires `BenchStart`/`BenchEnd`; writes CSV metadata; measures conflicts, switches, oscillations, time-to-cover (with the distance walked) and exposure from the visibility table (no traces); writes the per-agent and per-event run report |
@@ -240,7 +240,7 @@ The order among tickables isn't guaranteed by the engine **[inferred]**. Nothing
 
 ## 9. One logic path for every configuration
 
-The workload must be identical across B0–B2 and SQ, so **every configuration ends in the same `SetTarget(slot)`** on the brain, which owns the switch counter, the claim (B1/B2; SQ's claims are made by the subsystem), and the one `MoveToLocation` call. Only *how the slot is chosen* differs.
+The workload must be identical across B0–B2 and SQ, so **every configuration ends in the same `SetTarget(slot)`** on the brain, which owns the switch counter and the one `MoveToLocation` call. The claim is made just before it: by the brain's query handler in B1/B2 (a failed claim re-queries instead of calling `SetTarget`), by the subsystem in SQ. Only *how the slot is chosen* differs.
 
 | Config | Who chooses | When | Exclusivity |
 |---|---|---|---|
@@ -274,7 +274,7 @@ The workload must be identical across B0–B2 and SQ, so **every configuration e
 1. **Sharing may not beat an event-driven per-agent baseline on CPU** (H2). The per-agent shortcut traces only until the first hidden slot; the shared query traces every candidate. We measure and report it.
 2. **Event-driven work arrives in bursts.** The per-frame cap trades a few frames of latency for a lower p99. SC2 and SC6 check both sides.
 3. **Straight-line personal score.** Same error in every configuration (`01` §8).
-4. **Development-build EQS debugger overhead** is per query, so it favours SQ. Phase 8 measures it separately (`01b` #6).
+4. **Development-build EQS debugger overhead** is per finished query, and part of it grows with the number of query owners (`01b` #22): per-agent configurations pay it N times as often, and with N owners each time. It favours SQ, can't be compiled out with the launcher engine (no Test build), and isn't switched off by `bDebuggingInfoEnabled`. Phase 8 measures it from its own cycle stats (`EQS Debug StoreQuery`, `EQS Debug StoreStats`) and reports AI time with and without it (`01b` #6).
 5. **The solver is O(n²·m) per squad.** Fine for squads of 8–16; a 200-agent "squad" would need a different design.
 6. **Decisions aren't bit-identical across runs** (wall-clock EQS slice, `01b` B-1). All decision metrics are distributions over runs.
 
@@ -295,6 +295,9 @@ The workload must be identical across B0–B2 and SQ, so **every configuration e
 | **S1:** `USQCoverBehaviorDefinition` added; the block's root stays unscaled; navigation readiness also requires a complete corner-to-corner path; the floor is an `AStaticMeshActor`; `-SQArenaCheck` self-check | Smart Object validation (`01b` #19); slot offsets are relative to the actor; "no build in progress" is true before a build is queued; the floor needs no class of its own; the cooked-build proof of `03` S1 |
 | **S1:** the shared query's request filter must include claimed slots | The filter excludes them by default (`01b` #18) |
 | **S1:** readiness waits for the navigation system's build-finished event (plus the path test) instead of polling; the bounds volume calls `UpdateBounds()` after it gets its box | The review found the engine event (`05` B5); the self-check then found that the volume's cached bounds were empty and that the event also fires for a near-empty build (`01b` #20, `09` S1-c) |
+| **S3:** SC2 is checked on the event frames too (p99.9 and the event-window maximum), not only on p99 | B2's event frames reach 8.35 ms at N = 128 while its p99 is 0.05 ms: event windows are under 1% of the frames (`09` S3) |
+| **S3:** B1/B2 claim in the brain's query handler, not in `SetTarget` | A failed claim must re-query without changing the target; `SetTarget` stays the single path to movement |
+| **S3:** the EQS debugger's per-query cost scales with the number of owners | Found in the S3 review (`01b` #22); limit 4 in §12 and the Phase 8 plan updated |
 | **S2:** AI time also includes the engine's `Pathfinding` exclusive stat | `MoveToLocation`'s path query opens its own exclusive scope inside ours; without it, configurations that switch often would look cheaper (`05` C5, `07` S2) |
 | **S2:** a ninth game-module piece, `ASQGameMode` (no player pawn) | The template map's `PlayerStart` would otherwise put a colliding default pawn among the agents (`05` C2b) |
 | **S2:** one "valid cover" rule, `USQArenaSubsystem::IsValidCover`, and one 8 m constant | The self-check, the metrics and (from S3) the queries must agree on what counts as cover (`05` B4) |

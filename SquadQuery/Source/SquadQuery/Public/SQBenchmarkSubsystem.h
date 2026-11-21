@@ -10,6 +10,7 @@
 class ACameraActor;
 class ASQAgent;
 class AStaticMeshActor;
+class UEnvQuery;
 class USQArenaSubsystem;
 
 /**
@@ -33,7 +34,7 @@ class USQArenaSubsystem;
  *   conflicts       onsets of "two or more agents target the same slot"
  *   switches, oscillations, move requests   from the brains, counted over the capture
  *
- * Command line: -SQMode=Scripted (S2; S3 adds B0, B1, B2 and S5 SQ), -SQAgents=N (default 0: no run),
+ * Command line: -SQMode=Scripted|B0|B1|B2 (S5 adds SQ), -SQAgents=N (default 0: no run),
  * -SQWarmup=SEC (10), -SQCapture=SEC (60), -SQEventInterval=SEC (6, at least 1), -SQRunTag=NAME (run), -SQExit.
  * The seed is the arena's (-SQSeed=S).
  */
@@ -85,7 +86,6 @@ private:
 	{
 		int32 AwaitingEvent = INDEX_NONE;                // the event the agent is still getting into cover for
 		FVector PositionAtEvent = FVector::ZeroVector;   // where it stood when that event fired
-		FSQBrainCounters AtStart;                        // its brain's counters at BenchStart
 	};
 
 	/** How one agent answered one event: seconds to cover, and the straight-line distance from where it stood at the
@@ -107,7 +107,9 @@ private:
 	};
 
 	static FRunSettings ReadRunSettings();
-	bool ValidateRunSettings() const;
+	/** -SQMode value -> brain mode; false for an unknown value. */
+	static bool ParseMode(const FString& Mode, ESQBrainMode& OutMode);
+	bool ValidateRunSettings();
 	void HandleArenaReady();
 	void StartRun(UWorld& World);
 	void SpawnSquads(UWorld& World);
@@ -119,7 +121,12 @@ private:
 	void WriteRunReport() const;
 
 	FRunSettings Settings;
+	ESQBrainMode BrainMode = ESQBrainMode::Scripted;
 	ERunPhase Phase = ERunPhase::Idle;
+
+	/** The per-agent cover query (B0-B2), one template shared by every agent (EQS caches it, 01b finding 4). */
+	UPROPERTY(Transient)
+	TObjectPtr<UEnvQuery> AgentQuery;
 
 	UPROPERTY(Transient)
 	TObjectPtr<USQArenaSubsystem> Arena;

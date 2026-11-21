@@ -9,6 +9,7 @@
 #include "Engine/StaticMesh.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "SQAgentBrainComponent.h"
+#include "SquadMemberComponent.h"
 #include "UObject/ConstructorHelpers.h"
 
 ASQAgent::ASQAgent()
@@ -42,4 +43,5 @@ ASQAgent::ASQAgent()
 	Body->SetCanEverAffectNavigation(false);
 
 	Brain = CreateDefaultSubobject<USQAgentBrainComponent>(TEXT("Brain"));
+	SquadMember = CreateDefaultSubobject<USquadMemberComponent>(TEXT("SquadMember"));
 }

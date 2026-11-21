@@ -64,7 +64,10 @@ COMMON_ARGS = ("-windowed -ResX=1280 -ResY=720 -nosound -unattended -traceautost
 # Extra command-line arguments per configuration (02_System_Architecture.md section 9). Each entry is added in the
 # step whose code implements it: Scripted (S2, a metrics test oracle, not a benchmark configuration), B0-B2 (S3), SQ (S5).
 CONFIGS = {
-    "Scripted": "-SQMode=Scripted",
+    "Scripted": "-SQMode=Scripted",   # the metrics' test oracle (S2), not a configuration of the study
+    "B0": "-SQMode=B0",               # polled per-agent EQS (01 section 6.2)
+    "B1": "-SQMode=B1",               # B0 + Smart Object claims
+    "B2": "-SQMode=B2",               # event-driven per-agent EQS + claims
 }
 
 AI = csv_stats.AI_COLUMN
@@ -195,18 +198,23 @@ def read_report(path: str) -> tuple[dict, list[dict]]:
 
 
 def decision_metrics(agents_path: str, events_path: str) -> dict:
-    """Decision quality of one run (01_Problem_Analysis.md section 6.3), from the two run reports."""
+    """Decision quality and query work of one run (01_Problem_Analysis.md section 6.3), from the two run reports."""
     header, agents = read_report(agents_path)
     _, events = read_report(events_path)
+
+    def total(column: str) -> float:
+        """The column summed over agents; a missing column or an empty cell counts 0."""
+        return sum(float(r.get(column) or 0) for r in agents)
+
     captured_events = int(header.get("captured_events", 0))
-    capture_minutes = float(header.get("capture", 60.0)) / 60.0
+    capture_seconds = float(header.get("capture", 60.0))
+    capture_minutes = capture_seconds / 60.0
     seconds = [float(r["seconds_to_cover"]) for r in events]
     reached = sorted(s for s in seconds if s >= 0.0)
     # An agent whose slot stays valid cover for the new threat is in cover on the event frame (0 s). Those zeros are
     # most of the samples when the threat moves only a little, so time to cover is also given over the agents that
     # had to move: the ones the event exposed.
     moved = sorted(s for s in seconds if s > 0.0)
-    switches = sum(int(r["switches"] or 0) for r in agents)
     agent_frames = int(header.get("agent_frames", 0))
     result = {
         "captured_events": captured_events,
@@ -214,15 +222,27 @@ def decision_metrics(agents_path: str, events_path: str) -> dict:
         "conflict_onsets_per_min": int(header.get("conflict_onsets", 0)) / capture_minutes,
         "conflict_agent_frames": int(header.get("conflict_agent_frames", 0)),
         "in_cover_share": int(header.get("in_cover_agent_frames", 0)) / agent_frames if agent_frames else 0.0,
-        "switches_per_agent_per_event": switches / (len(agents) * captured_events) if agents and captured_events else 0.0,
-        "oscillations": sum(int(r["oscillations"] or 0) for r in agents),
-        "move_requests": sum(int(r["move_requests"] or 0) for r in agents),
-        "move_failures": sum(int(r.get("move_failures") or 0) for r in agents),
+        "switches_per_agent_per_event": total("switches") / (len(agents) * captured_events) if agents and captured_events else 0.0,
+        "oscillations": total("oscillations"),
+        "move_requests": total("move_requests"),
+        "move_retries": total("move_retries"),
+        "move_failures": total("move_failures"),
         "in_cover_by_next_event": len(reached) / len(seconds) if seconds else 0.0,
         "already_in_cover": sum(1 for s in seconds if s == 0.0) / len(seconds) if seconds else 0.0,
-        "move_retries": sum(int(r.get("move_retries") or 0) for r in agents),
         "stuck_at_end": sum(1 for r in agents if float(r.get("final_slot_distance_cm") or -1.0) > IN_COVER_RADIUS_CM),
+        # Query work (the per-agent EQS modes; zero for the oracle).
+        "queries_per_s": total("queries_started") / capture_seconds,
+        "queries_aborted": total("queries_aborted"),
+        "claim_failures_per_min": total("claim_failures") / capture_minutes,
+        "keep_checks": total("keep_checks"),
     }
+    # Item counts come from EQS debug data (plus one per keep-current trace), which exists only when the game had it
+    # (eqsdebug=1 in the report header). Without it the numbers would be partial, so they are left out.
+    if header.get("eqsdebug", "1") == "1":
+        result["item_tests_per_s"] = total("item_tests") / capture_seconds
+        result["items_generated_per_s"] = total("items_generated") / capture_seconds
+    if total("queries_finished"):
+        result["query_latency_mean_s"] = total("query_latency_s") / total("queries_finished")
     if reached:
         result["time_to_cover_median"] = csv_stats.percentile(reached, 50.0)
         result["time_to_cover_p95"] = csv_stats.percentile(reached, 95.0)
@@ -317,29 +337,32 @@ def write_summary(batch: str, environment: dict, records: list[dict]) -> str:
              "Each cell: median across runs of each run's statistic, then [min-max across runs]. AI = the per-frame sum of "
              + " + ".join(part.rsplit("/", 1)[-1] for part in AI.split("=", 1)[1].split("+"))
              + " exclusive time (01_Problem_Analysis.md section 6.3).", "",
-             "| Config | N | Runs | AI mean (ms) | AI p95 (ms) | AI p99 (ms) | GameThreadTime median (ms) | FrameTime median / p99 (ms) | PSO events | Log errors |",
-             "|---|---|---|---|---|---|---|---|---|---|"]
+             "| Config | N | Runs | AI mean (ms) | AI p95 (ms) | AI p99 (ms) | GameThreadTime median (ms) | FrameTime median / p99 (ms) | Queries / s | Item tests / s | PSO events | Log errors |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     order = sorted(groups.items(), key=lambda kv: (kv[0][1], kv[0][0]))
+    def stat(group: list[dict], column: str, name: str) -> list[float]:
+        return [g["stats"][column][name] for g in group if column in g["stats"]]
+
+    def metric(group: list[dict], name: str) -> list[float]:
+        return [g["decisions"][name] for g in group if name in g.get("decisions", {})]
+
     for (config, agents), group in order:
-        def stat(column: str, name: str) -> list[float]:
-            return [g["stats"][column][name] for g in group if column in g["stats"]]
-        lines.append(f"| {config} | {agents} | {len(group)} | {cell(stat('AI', 'mean'))} | {cell(stat('AI', 'p95'))} | "
-                     f"{cell(stat('AI', 'p99'))} | {cell(stat('GameThreadTime', 'median'))} | "
-                     f"{cell(stat('FrameTime', 'median'))} / {cell(stat('FrameTime', 'p99'))} | "
+        lines.append(f"| {config} | {agents} | {len(group)} | {cell(stat(group, 'AI', 'mean'))} | {cell(stat(group, 'AI', 'p95'))} | "
+                     f"{cell(stat(group, 'AI', 'p99'))} | {cell(stat(group, 'GameThreadTime', 'median'))} | "
+                     f"{cell(stat(group, 'FrameTime', 'median'))} / {cell(stat(group, 'FrameTime', 'p99'))} | "
+                     f"{cell(metric(group, 'queries_per_s'), 1)} | {cell(metric(group, 'item_tests_per_s'), 0)} | "
                      f"{sum(g.get('events', {}).get('PSO', 0) for g in group)} | {sum(g.get('log_errors', 0) for g in group)} |")
 
     lines += ["", "## Decision quality", "",
-              "| Config | N | Conflict onsets / min | Switches / agent / event | Oscillations | Already in cover | Time to cover, agents that moved: median / p95 (s) | Walk ratio median / p95 | In cover by next event | In-cover share | Stuck at end |",
-              "|---|---|---|---|---|---|---|---|---|---|---|"]
+              "| Config | N | Conflict onsets / min | Claim failures / min | Switches / agent / event | Oscillations | Already in cover | Time to cover, agents that moved: median / p95 (s) | Walk ratio median / p95 | In cover by next event | In-cover share | Stuck at end |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for (config, agents), group in order:
-        decisions = [g["decisions"] for g in group if "decisions" in g]
-        def metric(name: str) -> list[float]:
-            return [d[name] for d in decisions if name in d]
-        lines.append(f"| {config} | {agents} | {cell(metric('conflict_onsets_per_min'), 2)} | {cell(metric('switches_per_agent_per_event'), 2)} | "
-                     f"{cell(metric('oscillations'), 0)} | {cell(metric('already_in_cover'), 3)} | "
-                     f"{cell(metric('time_to_cover_moved_median'), 2)} / {cell(metric('time_to_cover_moved_p95'), 2)} | "
-                     f"{cell(metric('walk_ratio_median'), 2)} / {cell(metric('walk_ratio_p95'), 2)} | "
-                     f"{cell(metric('in_cover_by_next_event'), 3)} | {cell(metric('in_cover_share'), 3)} | {cell(metric('stuck_at_end'), 0)} |")
+        lines.append(f"| {config} | {agents} | {cell(metric(group, 'conflict_onsets_per_min'), 2)} | {cell(metric(group, 'claim_failures_per_min'), 2)} | "
+                     f"{cell(metric(group, 'switches_per_agent_per_event'), 2)} | "
+                     f"{cell(metric(group, 'oscillations'), 0)} | {cell(metric(group, 'already_in_cover'), 3)} | "
+                     f"{cell(metric(group, 'time_to_cover_moved_median'), 2)} / {cell(metric(group, 'time_to_cover_moved_p95'), 2)} | "
+                     f"{cell(metric(group, 'walk_ratio_median'), 2)} / {cell(metric(group, 'walk_ratio_p95'), 2)} | "
+                     f"{cell(metric(group, 'in_cover_by_next_event'), 3)} | {cell(metric(group, 'in_cover_share'), 3)} | {cell(metric(group, 'stuck_at_end'), 0)} |")
     lines += ["", f"Raw files: `Benchmarks/Raw/{batch}_*` (CSV, run reports and log per run) and `{batch}_manifest.json`."]
     path = os.path.join(SUMMARY_DIR, batch + "_summary.md")
     with open(path, "w", encoding="utf-8") as handle:

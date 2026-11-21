@@ -9,8 +9,9 @@ public class SquadQueryCore : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
-		// Phase 4: the engine basics only. AIModule (EQS), SmartObjectsModule (claims) and GameplayTags are added
-		// in the implementation step that first includes their headers (03_Implementation_Roadmap.md).
-		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine" });
+		// AIModule is public from S3: SquadQueryContext_Threat.h derives from UEnvQueryContext (a public header).
+		// SmartObjectsModule (claims, S5) and GameplayTags are added in the step that first includes their headers
+		// (03_Implementation_Roadmap.md).
+		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "AIModule" });
 	}
 }

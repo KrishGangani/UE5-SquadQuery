@@ -197,6 +197,77 @@ Not applied, with the reason: the threat-mode string compare (S3 replaces it wit
 
 ---
 
+## S3 · The per-agent baselines B0, B1, B2, captured before any SquadQuery code (2026-11-21)
+
+**Job `20261121_073601_e8dc36`** ("P07 S3: build editor + game, package, B0-B2 smoke (N32, 20 s), baseline capture …"): ✅ exit 0 in 798.9 s. Both targets built with **0 errors, 0 warnings**; cook `Success - 0 error(s), 0 warning(s)`. Then two batches, each pinned by the script itself (`cpu_affinity: 0xFFFF`), launching `SquadQuery.exe` directly:
+
+| # | Batch | Result |
+|---|---|---|
+| S3-a | `2026-11-21_085058_S3smoke`: B0, B1, B2 at N = 32, 20 s capture, 1 run each + priming | ✅ every run exit 0, 0 log errors: the chain to the full capture only continues if this passes |
+| S3-b | `2026-11-21_085156_S3baseline`: **B0, B1, B2 × N = 8 / 32 / 128 × 3 interleaved runs + priming** (28 runs, 16–19 s of wall time each) | ✅ every run exit 0, complete capture, both reports; **0 warnings and 0 errors in all 28 run logs**. Summary `Benchmarks/Summaries/2026-11-21_085156_S3baseline_summary.md`; event frames `…_events.md` (`Tools\analyse_events.py`) |
+
+**Repeatability.** Within each configuration, all three runs have the same arena hash, the same start-position hash (`0x08D0D20E` at N = 128) and **identical decision metrics** (every decision cell has a min-max range of zero). The fixed step makes the timeline exact, and at these loads every query finishes in the frame it starts (below), so EQS's wall-clock time slicing never changes a result. The cost figures vary from run to run, as they must: AI mean at N = 128 0.424–0.435 ms (B0), 0.376–0.381 ms (B1), 0.025–0.026 ms (B2).
+
+**The baselines at a glance** (medians of 3 runs; full tables with ranges in the summary files):
+
+| | N | AI mean (ms) | AI p99 | AI p99.9 | AI max | Queries / s | Item tests / s | Conflicts / min | Claim failures / min | In cover by next event | In-cover share | Time to cover, movers: median / p95 (s) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| B0 | 8 | 0.034 | 0.253 | 0.495 | 0.600 | 16.1 | 1,059 | 9 | 0 | 0.812 | 0.746 | 1.37 / 5.24 |
+| B1 | 8 | 0.034 | 0.269 | 0.496 | 0.650 | 16.1 | 860 | 0 | 0 | 1.000 | 0.943 | 1.21 / 2.74 |
+| B2 | 8 | 0.002 | 0.002 | 0.491 | 0.775 | 1.4 | 69 | 0 | 4 | 1.000 | 0.948 | 1.30 / 2.92 |
+| B0 | 32 | 0.132 | 0.481 | 0.683 | 1.756 | 64.1 | 5,354 | 43 | 0 | 0.688 | 0.597 | 1.53 / 5.02 |
+| B1 | 32 | 0.127 | 0.509 | 0.724 | 1.078 | 64.1 | 4,436 | 0 | 0 | 0.984 | 0.907 | 1.28 / 2.97 |
+| B2 | 32 | 0.007 | 0.002 | 1.998 | 2.715 | 5.7 | 399 | 0 | 22 | 0.966 | 0.892 | 1.16 / 3.39 |
+| B0 | 128 | 0.426 | 1.132 | 1.430 | 1.700 | 256.3 | 21,395 | 160 | 0 | 0.666 | 0.573 | 1.45 / 5.41 |
+| B1 | 128 | 0.380 | 0.833 | 1.254 | 1.489 | 256.4 | 16,626 | 0 | 5 | 0.970 | 0.851 | 1.38 / 4.20 |
+| B2 | 128 | 0.026 | 0.050 | 7.395 | 8.347 | 23.9 | 1,477 | 0 | 151 | 0.955 | 0.861 | 1.04 / 3.55 |
+
+**What the baselines answer** (`01` §5; the comparison with SquadQuery comes in S7):
+
+| Hypothesis | Answer from the baselines |
+|---|---|
+| **H1** per-agent queries repeat agent-independent work | The work to beat, recorded: at N = 128, B0 runs **21,395 item tests per second** (256 queries per second, 41 items generated and 84 item tests per query), B1 16,626, B2 1,477. Every member of a squad evaluates the same threat visibility for overlapping boxes |
+| **H3** polling repeats work when nothing changed | **Confirmed.** The threat moves every 6 s; the polled baselines query 12 times per agent in that interval. At N = 128 B0 costs **16× B2's AI time** (0.426 vs 0.026 ms per frame) and **14× its item tests** (21,395 vs 1,477 per second) for a worse outcome |
+| **H4** independent choices collide | **Confirmed, and it grows faster than N:** B0 has 9, 43 and 160 conflict onsets per minute at N = 8, 32 and 128. The consequences show: only 67% of agent-events in cover before the next event at N = 128 (B1: 97%), 57% of agent-frames in cover, and 40 agents not at their slot at the end |
+| **H5** claims remove collisions but not their cost | **Confirmed.** Claims bring conflicts to 0 in B1 and B2. The races move into claim failures: at N = 128 B2 loses **151 claims per minute**, because all agents query on the same frame and pick from the same stale picture; B1's spread-out polls lose 5. Each failure is a query repeated on the next frame |
+| **H6** event-driven work bunches into event frames | **Confirmed, strongly.** B2's AI time is 0.001 ms per frame outside the event windows and up to **8.35 ms** in them (N = 128; 0.775 ms at N = 8, 2.7 ms at N = 32). Its **p99 (0.05 ms) misses this entirely**: event windows are under 1% of the frames. B0 and B1 spread their work, so their maximum is lower (1.5–1.7 ms) but their mean is 15–16× higher |
+| **H7** the global EQS slice adds queueing latency | **Not at these loads.** Every query finished in the frame it was started (latency 0 at the 1/60 s resolution of world time). B2's worst event frame, 128 queries started together, took 8.35 ms in all: inside the 10 ms slice. Queueing would start above that |
+
+**The nesting check deferred from S2.** In B0 at N = 128, `EnvQueryManager` and `SquadQueryDecide` are both non-zero on 3,562 of 3,600 frames; the decision code that runs inside the EQS tick (the finish delegates) is recorded in its own exclusive scope, which the CSV profiler subtracts from the enclosing one (`CsvProfiler.h:129-131`; the code path in `01b` #5), so AI time does not count it twice. A direct proof with an Insights trace of one event frame is part of Phase 8.
+
+**Consequences for the next steps:**
+1. **SC2 has to be judged on the event frames.** "p99 AI ≤ 2.0 ms at N = 128" is passed by B2 (0.05 ms) while its event frames reach 8.35 ms. From S7 on, SC2 is evaluated on p99 **and** on the event-window maximum and p99.9 (`Tools\analyse_events.py`), and the summary reports them (`02` §13). The definition in `01` §8 is not loosened: an event frame above 2 ms fails it.
+2. **The bar for SquadQuery is B2, not B0.** B2 is already 16× cheaper than B0 on average and has no conflicts; SquadQuery has to win on the event-frame spike (it caps evaluations per frame, `02` §7), on claim races (none, by construction) and on decision quality, while H2 predicts its shared query may not trace less than B2's single-result queries.
+3. **The EQS debugger's per-query bookkeeping** (`01b` #22) is included in these numbers, and it costs B0/B1 most. Phase 8 quantifies it.
+
+### S3 audit trail (before the build)
+
+**1. `code-review` (medium) on the S3 diff.** Seven findings, all minor:
+
+| # | Finding | Decision |
+|---|---|---|
+| R1 | The seeded first-poll phase never took effect: a cooldown set before a tick function's first tick is ignored, so every polled agent ticked on the same first frame | **Fixed:** the first tick applies the delay (`05` D6; `06` §25; `07` S3) |
+| R2 | B2's abort on a threat event ran outside `SquadQueryDecide`, inside the director's scope | **Fixed:** `OnThreatEvent` opens the decision stat |
+| R3 | The keep-current item test was counted before the early return that skips the trace | **Fixed:** counted next to the trace |
+| R4 | Aborted queries were mixed into the mean query latency | **Fixed:** aborted queries counted apart (`queries_aborted`); latency over completed ones |
+| R5 | Without EQS debug data the summary would show partial item counts as if measured | **Fixed:** `eqsdebug=` in the report header (compiled in and switched on); the script leaves item counts out otherwise |
+| R6 | A B2 agent whose query finds no usable slot stays where it is until the next event | **Not changed, stated as a limit:** the event-driven baseline and SquadQuery both act only on events (SQ keeps its assignment when its query finds nothing, `02` §6); a retry policy would change what "event-driven" means for one side only. With ≥ 296 usable slots per threat position, an empty result needs a very crowded box (`09` S1) |
+| R7 | The docs were not updated yet | Done in this step's commit (this file, `01b`, `02`, `04`, `05` part D, `06` §22-26, `07` S3) |
+
+**2. `simplify` on the reviewed diff** (reuse, simplification, efficiency, altitude). Applied:
+
+| # | Angle | Change |
+|---|---|---|
+| A1 | Reuse | The cover rule's two parts as static arena helpers (`IsFarFromThreat`, `TraceHidden`), used by the visibility table, `IsValidCover` and the keep-current check: one definition of heights, channel and distance |
+| A2 | Efficiency | Keep-current: the distance comparison first, so the trace runs only when keeping the slot is possible. A competent baseline, not a strawman |
+| A3 | Efficiency | The finish delegate bound once (one allocation per query less); the squad cached once in `ConfigureMode`; the cheap guards first in `StartQuery` |
+| A4 | Simplification | `RunningQueryId` removed (the instance's `QueryID` is the same value); the brain's copy of the squad id removed (the report reads the member's); counters reset at `BenchStart` instead of snapshot-and-subtract; `TOptional` for the pending first-poll delay; one mode table for parsing and the error message; an indexed loop and the map's size instead of two hand-kept counters in the arena; `total()` and shared `stat`/`metric` helpers in the script |
+| A5 | Altitude | Found that the EQS debugger's per-query bookkeeping grows with the number of query owners and isn't switched off at run time (`01b` #22). Not fixable here (no Test build); recorded as limit 4 in `02` §12 with a measurement plan for Phase 8 |
+
+Not applied, with the reason: a one-shot timer instead of the first-tick delay (same size, and the poll stays a tick like a Behavior Tree service); a shared plugin helper for starting and reading queries (wait for S5, when the second user exists); one `SetThreat` call for all squads (the per-squad lookup is negligible, and the per-squad API is the general one); the unused parameters of `MakeAgentCoverQuery` and `Configure` (the squad query uses them in S5).
+
+---
+
 ## Phases 5–8 (to be written)
 
-- S3: the baseline capture; S4: solver tests; S5: SQ checks; S7: the headline matrix and SC1–SC7.
+- S4: solver tests; S5: SQ checks; S7: the headline matrix and SC1–SC7.

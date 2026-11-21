@@ -341,9 +341,11 @@ void USQArenaSubsystem::FillSlotHandles(UWorld& World)
 
 	// GetAllSlots returns a block's slots in definition order, and the table was filled in the same order.
 	TArray<FSmartObjectSlotHandle> BlockSlots;
-	int32 WithHandle = 0;
-	for (FSQCoverSlot& Slot : Slots)
+	SlotIndexByHandle.Reset();
+	SlotIndexByHandle.Reserve(Slots.Num());
+	for (int32 TableIndex = 0; TableIndex < Slots.Num(); ++TableIndex)
 	{
+		FSQCoverSlot& Slot = Slots[TableIndex];
 		if (Slot.SlotIndex == 0)
 		{
 			BlockSlots.Reset();
@@ -356,9 +358,10 @@ void USQArenaSubsystem::FillSlotHandles(UWorld& World)
 		if (BlockSlots.IsValidIndex(Slot.SlotIndex))
 		{
 			Slot.Handle = BlockSlots[Slot.SlotIndex];
-			++WithHandle;
+			SlotIndexByHandle.Add(Slot.Handle, TableIndex);
 		}
 	}
+	const int32 WithHandle = SlotIndexByHandle.Num();
 	// A block whose definition failed validation never registers, silently (01b finding 19): say so in every run.
 	UE_CLOG(WithHandle != Slots.Num(), LogSQArena, Error, TEXT("Only %d of %d cover slots are registered Smart Object slots."), WithHandle, Slots.Num());
 }
@@ -373,14 +376,18 @@ void USQArenaSubsystem::BuildVisibilityTable(UWorld& World)
 	HiddenTable.Init(false, ThreatPositions.Num() * Slots.Num());
 	for (int32 ThreatIndex = 0; ThreatIndex < ThreatPositions.Num(); ++ThreatIndex)
 	{
-		const FVector Eye = ThreatPositions[ThreatIndex] + FVector(0.f, 0.f, ThreatEyeHeightCm);
 		for (int32 SlotIndex = 0; SlotIndex < Slots.Num(); ++SlotIndex)
 		{
-			const FVector Chest = Slots[SlotIndex].Location + FVector(0.f, 0.f, SlotProbeHeightCm);
-			HiddenTable[ThreatIndex * Slots.Num() + SlotIndex] = World.LineTraceTestByChannel(Eye, Chest, ECC_Visibility, Params);
+			HiddenTable[ThreatIndex * Slots.Num() + SlotIndex] = TraceHidden(World, ThreatPositions[ThreatIndex], Slots[SlotIndex].Location, Params);
 		}
 	}
 	UE_LOG(LogSQArena, Display, TEXT("Visibility table: %d traces in %.1f ms"), HiddenTable.Num(), (FPlatformTime::Seconds() - StartSeconds) * 1000.0);
+}
+
+bool USQArenaSubsystem::TraceHidden(const UWorld& World, const FVector& ThreatFloor, const FVector& SlotFloor, const FCollisionQueryParams& Params)
+{
+	return World.LineTraceTestByChannel(ThreatFloor + FVector(0.f, 0.f, ThreatEyeHeightCm), SlotFloor + FVector(0.f, 0.f, SlotProbeHeightCm),
+		ECC_Visibility, Params);
 }
 
 bool USQArenaSubsystem::RunSelfCheck(UWorld& World) const

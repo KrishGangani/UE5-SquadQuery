@@ -7,7 +7,8 @@
 | A | Phase 4, F1–F3 (foundation) | `.uproject`, two `Target.cs`, two `Build.cs`, two module `.cpp`, `.uplugin`, three config `.ini`, `Tools\*.bat` |
 | B | S1 (arena and navigation) | `SQCoverBlock.h/.cpp`, `SQArenaSubsystem.h/.cpp`, the changed `SquadQuery.Build.cs` |
 | C | S2 (agents, director, scripts) | `SQAgent.h/.cpp`, `SQAgentBrainComponent.h/.cpp` (S2 version), `SQBenchmarkSubsystem.h/.cpp`, the changed `SquadQuery.Build.cs` and `DefaultEngine.ini`, `Tools\csv_stats.py`, `Tools\run_bench.py` |
-| D | S3 onwards | written with the code |
+| D | S3 (squads, the per-agent query, baselines B0-B2) | `SquadQueryCore`: `Squad.h`, `SquadMemberComponent.h/.cpp`, `SquadQuerySubsystem.h/.cpp`, `SquadQueryContext_Threat.h/.cpp`, `SquadQueryWork.h/.cpp`, `Build.cs`; game: `SQCoverSlotGenerator.h/.cpp`, `SQQueries.h/.cpp`, `SQAgentBrainComponent` (S3 version), director, agent and arena changes; `Tools\run_bench.py`, `Tools\analyse_events.py` |
+| E | S4 onwards | written with the code |
 
 Engine references are relative to `C:\Program Files\Epic Games\UE_5.8\Engine\`, version 5.8.4.
 
@@ -624,3 +625,95 @@ Copied from UE5-UpdateBudget and adapted. What changed, and why:
 | `run_bench.py` | A run fails if its exit code isn't 0, its capture is missing or partial, a report is missing or unreadable, or its log has an `Error:` line | Nothing silently enters a summary |
 | `run_bench.py` | `--label` may contain only letters, digits, `_` and `-`; the summary's definition of AI time is generated from `AI_COLUMN` | The label becomes part of `-SQRunTag=`, which the game reads only up to the first space; a definition written out twice had already drifted once (*review*) |
 | `run_bench.py` | `STARTUP_MARGIN_SECONDS = 240` | Engine start, navmesh build, spawning and the first-run PSO wait seen in Phase 4 (`09`) |
+
+---
+
+## Part D · S3: squads, the per-agent cover query and the three baselines
+
+S3 builds everything the three per-agent baselines need (`01` §6.2): **B0** polls its own EQS query every 0.5 s ± 0.1 s; **B1** does the same and claims the slot it picks; **B2** queries only when the threat moves (or a claim fails) and claims. The squad registry and the threat context live in the reusable plugin, because SquadQuery (S5) reads the threat the same way; the query, the generator and the brain live in the game module. The squad evaluation itself does not exist yet: **the baselines are captured before any SquadQuery code** (`03`).
+
+### D1. Build rules (changed in S3)
+
+| File · line | What changed, and why |
+|---|---|
+| `SquadQueryCore.Build.cs`: `PublicDependencyModuleNames … "AIModule"` | `SquadQueryContext_Threat.h` derives from `UEnvQueryContext`, a public header of `AIModule`, so the dependency is public. Smart Objects join in S5 |
+| `SquadQuery.Build.cs` | Unchanged: `AIModule` and `SmartObjectsModule` are already public (the generator header derives from `UEnvQueryGenerator_SmartObjects`), and `SquadQueryCore` stays private because no public game header includes a core header (the brain only forward-declares `USquad`) |
+
+### D2. `SquadQueryCore`: `Squad.h`, `SquadMemberComponent.h/.cpp`, `SquadQuerySubsystem.h/.cpp`
+
+| Line | What it does, and why |
+|---|---|
+| `#define UE_API SQUADQUERYCORE_API` … `#undef UE_API` | The UE 5.6+ convention for exporting members of a `MinimalAPI` class: `UCLASS(MinimalAPI)` exports only what reflection needs, and each function another module calls is marked `UE_API`. Inline getters need no export |
+| `UCLASS(MinimalAPI) class USquad : public UObject` | One squad. A UObject because an EQS query needs a UObject owner and the contexts must find the squad from it (`02` §4.1). S3 keeps only its id, members and threat; S5 adds the evaluation state |
+| `UPROPERTY(Transient) TArray<TObjectPtr<USquadMemberComponent>> Members;` | GC-visible member list, changed only by the subsystem (`friend class USquadQuerySubsystem`) |
+| `HasThreat()`, `GetThreatLocation()` | What the threat context reads |
+| `USquadMemberComponent`: `SetSquadId` before `BeginPlay`; `BeginPlay` → `RegisterMember(*this)`; `EndPlay` → `UnregisterMember(*this)` | Makes any pawn a squad member. The director sets the id between `SpawnActorDeferred` and `FinishSpawning`, so registration in `BeginPlay` already knows the squad. Never ticks |
+| `UCLASS(MinimalAPI) class USquadQuerySubsystem : public UWorldSubsystem` (S3) | The registry: `RegisterMember` creates a squad on first use (`Squads.FindOrAdd`, `NewObject<USquad>(this)`), `UnregisterMember` removes the member and clears its back pointer, `SetThreat(SquadId, Location)` stores the threat, `FindSquad`, `GetSquads`. Game and PIE worlds only. `Deinitialize` clears every member's squad pointer, so nothing points at a squad the world is destroying. In S5 it becomes tickable and evaluates squads |
+
+### D3. `SquadQueryCore`: `SquadQueryContext_Threat.h/.cpp`, `SquadQueryWork.h/.cpp`
+
+| Line | What it does, and why |
+|---|---|
+| `static USquad* ResolveSquad(UObject* QueryOwner)` | The squad a query speaks for: the owner itself if it is a `USquad` (the shared query, S5), else the owner actor's member component's squad (a per-agent query). One function, so every configuration resolves the threat the same way |
+| `ProvideContext(…)` → `UEnvQueryItemType_Point::SetContextHelper(ContextData, Squad->GetThreatLocation())` | One point, on the floor; the tests add their own heights. No threat → no point, and the tests that need it have nothing to compare against |
+| `struct FSquadQueryWork { ItemsGenerated; ItemTests; }` and `FromFinishedQuery(const FEnvQueryInstance&)` | How much work a finished query did, for the "item tests per second" metric. Read from the instance's EQS debug data (`DebugData.OptionStats[…].StepData[…].NumProcessedItems`, `AIModule/Classes/EnvironmentQuery/EnvQueryTypes.h:694-726`): per option, the generator steps count generated items, every later step counts the items its test processed, partial time-sliced steps included. That data exists only under `USE_EQS_DEBUGGER` (every build but Test and Shipping, `EnvQueryTypes.h:33`), so the code is inside `#if USE_EQS_DEBUGGER` and returns zeros otherwise |
+
+### D4. `SQCoverSlotGenerator.h/.cpp`
+
+| Line | What it does, and why |
+|---|---|
+| `UCLASS(HideDropdown) class USQCoverSlotGenerator : public UEnvQueryGenerator_SmartObjects` | Exactly the engine's Smart Object generator (`01b` #10). Its settings are `protected` with no setters (`SO/Public/EnvQueryGenerator_SmartObjects.h:19-39`), so a subclass sets them from code. `HideDropdown`: not offered in the editor's EQS generator list |
+| `Configure(OriginContext, HalfExtent, bOnlyClaimable, bIncludeClaimedSlots)` | Origin context (the querier now; every squad member in S5), box half-size, whether only claimable slots are kept (engine default `true`), and whether the spatial query returns claimed slots (`SmartObjectRequestFilter.bShouldIncludeClaimedSlots`, default `false`, `01b` #18). The per-agent query uses both defaults; the squad query (S5) flips both |
+
+### D5. `SQQueries.h/.cpp`
+
+| Line | What it does, and why |
+|---|---|
+| `inline const FVector BoxHalfExtentCm(1500.f, 1500.f, 200.f);` | ±15 m × ±15 m × ±2 m around each origin: about three cover blocks each way (`02` §7). `inline` (C++17): one object for every file that includes the header |
+| `MakeHiddenFromThreatTest`: `UEnvQueryTest_Trace`, context `USquadQueryContext_Threat`, `GeometryByChannel` on `Visibility`, line, from the context to the item, heights 170 / 90 cm, `Filter`, `BoolValue = true` | "The threat can't see this slot": the trace must hit something. The same channel and heights as the arena's visibility table (`USQArenaSubsystem::ThreatEyeHeightCm`, `SlotProbeHeightCm`), so the AI and the metrics agree on "hidden" |
+| `MakeFarFromThreatTest`: `UEnvQueryTest_Distance`, `Distance2D` to the threat, `Filter`, `Minimum`, `USQArenaSubsystem::MinThreatDistanceCm` | "At least 8 m from the threat", the arena's one constant |
+| `MakeAgentCoverQuery(Outer)`: generator around `UEnvQueryContext_Querier`; the two filters; `NearMe` = `Distance2D` to the querier, `Score`, `InverseLinear` | The per-agent query: hidden, far enough, and the nearest first. The options and tests are created with the option as their outer, as an asset would own them |
+| `Option->Tests[Index]->TestOrder = Index;` | An asset stores each test's order; the manager rebuilds it only if the last test's order is 0 (`EnvQueryManager.cpp:874-884`). Set explicitly, so the order is ours, not inferred |
+| (engine) | In `SingleResult` mode the manager moves the most expensive filter (the trace) last and stops at the first item that passes (`01b` #3); the cheap distance filter and the score run on every item first. A competent per-agent implementation, not a strawman |
+
+### D6. `SQAgentBrainComponent` (S3 version)
+
+| Line | What it does, and why |
+|---|---|
+| `enum class ESQBrainMode { Scripted, PolledEQS, PolledClaims, EventClaims }` | The oracle and B0, B1, B2 |
+| `struct FSQBrainCounters`: S2's movement counters plus queries started, completed and aborted, items generated, item tests, keep checks, claim failures, summed query latency | What the run report needs. The director resets it at `BenchStart` (`ResetCounters()`), so the final values are the capture's (*simplify:* the first version copied it at `BenchStart` and subtracted, which needed an `operator-` kept in step with every field) |
+| `ConfigureMode(Mode, Query, PollSeed)` | Called after the agent finished spawning: caches the squad (`ResolveSquad`, once; squads live as long as the world), binds the query-finished delegate once (the engine's own EQS nodes keep theirs as a member, `BTTask_RunEQSQuery.cpp:29`), seeds the poll stream and enables ticking for B0 and B1 only |
+| `PendingFirstPollDelay` and the first `TickComponent` | A seeded first poll anywhere in one interval, so 128 agents don't poll in step. A newly enabled tick function always runs on the next frame, and a cooldown set before its first tick is ignored (`TickTaskManager.cpp:1681-1691, 2463-2477`), so the first tick only sets the delay and returns. *Found in review:* the first version set the cooldown in `ConfigureMode` and every agent polled on the same frame |
+| `TickComponent`: re-arm with 0.5 s ± 0.1 s, then `StartQuery()` | A Behavior Tree service re-arms the same way every time it runs (`AIModule/Private/BehaviorTree/BTService.cpp:105-109`; defaults 0.5 s and 0.1 s at `:20-21`). A poll while the previous query still runs does nothing |
+| `OnThreatEvent()` | B2 only: abort the running query (it was asked about the old position) and start a new one. Inside `SquadQueryDecide`: *found in review*, the abort's scan of running queries was first counted as the director's time |
+| `StartQuery()`: cheap guards first; `PrepareQueryInstance(Request, SingleResult)` + `RunQuery(Instance, QueryFinishedDelegate)` | Exactly what `FEnvQueryRequest::Execute` does (`EnvQueryManager.cpp:282-286`), except that we keep the instance, whose debug data `FSquadQueryWork` reads when it finishes |
+| `AbortQuery()` → `Manager->AbortQuery(RunningQuery->QueryID)` | The engine calls the finish delegate at once with an aborted result (`EnvQueryManager.cpp:408-428`) |
+| `OnQueryFinished(Result)` | Inside `SquadQueryDecide`: the delegate runs inside the EQS tick, but outside the EQS budget (`01b` #5). Adds the query's work, counts it as completed (with its latency) or aborted (without: an aborted query was not waited for, *review*), then: no result → keep the current target; the best slot → `FindSlotIndex` (one hash lookup, `05` B4); the same slot, or `ShouldKeepCurrent` → nothing; else, for B1/B2, `MarkSlotAsClaimed(Handle, Normal)`: on failure count it and query again next frame (`01b` #8); on success free the old claim and keep the new one; then `SetTarget` |
+| `ShouldKeepCurrent(NewSlot)` | The keep-current rule of `02` §7: a valid slot is left only for one at least 3 m closer. With claims, the agent's own slot is never in its own results (it is claimed, `01b` #8), so its validity must be checked: the distance comparison first (no trace if the new slot is more than 3 m closer, *simplify*), then the 8 m rule and one Visibility trace from the threat, both through the arena's shared helpers (`USQArenaSubsystem::IsFarFromThreat`, `TraceHidden`, *simplify*). The trace is counted as **one item test**, so the work comparison stays honest |
+| `ReleaseClaim()` | `MarkSlotAsFree(Claim)`, then forget the handle. Also in `EndPlay`: a claim must not outlive its holder (`01b` #7) |
+| `EndPlay` → `SilentlyRemoveAllQueriesByQuerier(*GetOwner())` | No query may call back into a component that is going away |
+| S2's `SetTarget`, `RequestMove`, `OnMoveFinished`, `RetryMove` | Unchanged: every configuration ends here (`05` C3) |
+
+### D7. Director, agent and arena (changed in S3)
+
+| Line | What changed, and why |
+|---|---|
+| `SQBench::Modes[]` and `ParseMode` | `-SQMode=Scripted|B0|B1|B2` → `ESQBrainMode`, from one table; the error message lists the names from the same table (*simplify*) |
+| `AgentQuery = SQQueries::MakeAgentCoverQuery(*this);` | One query template for every agent, a `UPROPERTY` of the director. The EQS manager caches templates, not results (`01b` #4), so every query of the run uses the same cached template |
+| `Agent->GetSquadMember()->SetSquadId(SquadIndex)` before `FinishSpawning`; `ConfigureMode(…, PollSeed)` after | The member registers in `BeginPlay`; the brain needs its registered squad and tick function. The poll seed is `HashCombineFast(seed, agent index)`: per agent, and fixed by the run's seed |
+| `FireThreatEvent`: `SetThreat(SquadId, ThreatLocation)` for every squad, then `OnThreatEvent()` on every brain (B2) or the scripted assignment | Every configuration learns of the threat the same way (`01` §6.2) |
+| `ResetCounters()` at `BenchStart`; the report's squad from `GetSquadMember()->GetSquadId()` | One squad id (the member's) instead of a copy in the brain (*simplify*) |
+| The agents report: `queries_started, queries_finished, queries_aborted, items_generated, item_tests, keep_checks, claim_failures, query_latency_s` | The query work per agent over the capture |
+| Header field `eqsdebug=` | 1 if the item counts are real: the EQS debugger is compiled in **and** `FEnvQueryInstance::bDebuggingInfoEnabled` is on (`EnvQueryTypes.h:1317`). The script leaves item counts out otherwise (*review*) |
+| `ASQAgent`: `UPROPERTY(VisibleAnywhere) TObjectPtr<USquadMemberComponent> SquadMember` | Every agent is a squad member in every configuration; the baselines read their threat through it |
+| `USQArenaSubsystem::FindSlotIndex(Handle)` and `TMap<FSmartObjectSlotHandle, int32> SlotIndexByHandle` | EQS returns slot handles; the table works in indices. Filled with the handles once (`FillSlotHandles`); the handle type has its own `GetTypeHash` (`SO/Public/SmartObjectTypes.h:254-257`) |
+| `IsFarFromThreat`, `TraceHidden` (static) | The cover rule's two parts, now shared by the visibility table, `IsValidCover` and the baselines' keep-current check (*simplify*) |
+
+### D8. `Tools\run_bench.py` (changed in S3)
+
+| Change | Why |
+|---|---|
+| `CONFIGS`: `B0`, `B1`, `B2` | The baselines enter with the step that implements them |
+| `decision_metrics`: queries per second, aborted queries, item tests and items generated per second (only when `eqsdebug=1`), claim failures per minute, keep checks, mean query latency (completed queries) | H1 (work), H3 (polling repeats work), H5 (claim races) need them |
+| Summary: `Queries / s`, `Item tests / s` in the cost table; `Claim failures / min` in the decision table | The numbers the baselines are compared on |
+| A `total(column)` helper and one `stat`/`metric` helper per table | The same sum and lookup were written out a dozen times (*simplify*) |

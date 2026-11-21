@@ -63,3 +63,16 @@
 | A time-to-cover median dominated by agents that never had to move | Median 0.00 s in every configuration | Report the share already in cover and the time over the agents that moved (`05` C5) | Count the zeros in `_events.csv` |
 | A run label with a space | The game writes its report under a truncated tag and the script finds nothing | Restrict labels to letters, digits, `_` and `-` (`05` C5) | Compare `-SQRunTag=` in the log with the expected name |
 | Counting conflict onsets with state carried over from the warm-up | `conflict_onsets = 0` while `conflict_agent_frames > 0` | Reset the per-slot conflict state at `BenchStart` (`05` C4) | Both numbers are in the report header |
+
+## S3: per-agent baselines
+
+| Mistake | How to spot it | How to prevent it | How to debug it |
+|---|---|---|---|
+| ⚠ caught (review): **a poll phase that never takes effect.** A cooldown set before a tick function's first tick is ignored, and a newly enabled tick runs on the next frame | Every polled agent queries on the same first frame; `Queries / s` spikes once per interval instead of spreading | Apply the seeded delay in the first tick (`05` D6, `06` §25) | Count `queries_started` per frame in a capture |
+| ⚠ caught (review): **decision work outside the decision stat.** B2's abort on a threat event ran inside the director's timing scope | B2's AI time is lower than its work suggests | Every entry point of decision code opens `SquadQueryDecide` (`05` D6) | Insights: look for EQS calls under `SQBench` |
+| ⚠ caught (review): **counting work that didn't happen.** The keep-current item test was counted before the early return that skips the trace | Item tests per second higher than traces in Insights | Count a test next to the call that does it | Compare `keep_checks` with traces |
+| ⚠ caught (review): **mixing aborted queries into latency.** An aborted query ends at once | B2's mean query latency far below B0's and B1's for the same query | Count aborted queries apart; latency over completed ones only | `queries_aborted` in the report |
+| ⚠ caught (simplify): **a baseline that does avoidable work.** Tracing the current slot even when the new one is more than the keep bonus closer; a new finish delegate per query; resolving the squad on every query | The baseline's AI time includes overhead a careful game wouldn't have, which makes the new method look better than it is | Cheap tests first; bind delegates once; cache what doesn't change (`05` D6) | Insights: our own scopes inside `SquadQueryDecide` |
+| Comparing configurations with Development-only engine overhead that scales differently | Per-agent queries pay the EQS debugger's per-query bookkeeping N times as often as squad queries (`01b` #22) | Measure that overhead itself (its cycle stats) and report it next to the result (`02` §12) | `stat AI_EQS` / Insights: `EQS Debug StoreQuery`, `EQS Debug StoreStats` |
+| Expecting an agent to see its own claimed slot in its query | With claims, the current slot never comes back, so the agent switches every poll | Check the current slot separately (keep-current rule, `02` §7) | `switches` per agent per event in B1 vs B0 |
+| A claim that outlives its holder | Slots stay claimed after agents are destroyed; later queries find fewer slots | Free the claim in `EndPlay` (`05` D6) | Count claimed slots at the end of a run |

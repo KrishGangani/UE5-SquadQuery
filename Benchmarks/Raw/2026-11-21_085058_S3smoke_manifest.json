@@ -1,0 +1,552 @@
+{
+  "environment": {
+    "date": "2026-11-21T08:50:58",
+    "engine": "5.8.4 (CL 58902052)",
+    "build_config": "Development (packaged)",
+    "compiler": "MSVC 14.44.35229, Windows SDK 10.0.22621.0",
+    "cpu": "Intel(R) Core(TM) i7-14650HX",
+    "gpus": "Intel(R) UHD Graphics (driver 32.0.101.7088); NVIDIA GeForce RTX 5070 Laptop GPU (driver 32.0.16.1047)",
+    "ram_gb": "31.6",
+    "os": "Microsoft Windows 11 Home Single Language build 26200",
+    "power_plan": "Power Scheme GUID: 6fecc5ae-f350-48a5-b669-b472cb895ccf  (Turbo)",
+    "on_ac_power": true,
+    "resolution": "1280x720 windowed, default scalability",
+    "eqs": "MaxAllowedTestingTime 0.01 s, breadth first (engine default, restated in DefaultGame.ini); EQS debugger on (Development)",
+    "common_args": "-windowed -ResX=1280 -ResY=720 -nosound -unattended -traceautostart=0 -deterministic -FPS=60 -novsync -SQExit -csvStartOnEvent=BenchStart -csvStopOnEvent=BenchEnd",
+    "cpu_affinity": "0xFFFF (performance cores only; hybrid CPU)"
+  },
+  "runs": [
+    {
+      "name": "2026-11-21_085058_S3smoke_B0_N32_r0_prime",
+      "config": "B0",
+      "agents": 32,
+      "run": 0,
+      "priming": true,
+      "exit_code": 0,
+      "wall_seconds": 9.1,
+      "command": "\"D:\\UNREAL PORTFOLIO\\P07_SquadQuery\\Build\\Windows\\SquadQuery\\Binaries\\Win64\\SquadQuery.exe\" -windowed -ResX=1280 -ResY=720 -nosound -unattended -traceautostart=0 -deterministic -FPS=60 -novsync -SQExit -csvStartOnEvent=BenchStart -csvStopOnEvent=BenchEnd -SQAgents=32 -SQSeed=1 -SQWarmup=10.0 -SQCapture=20.0 -SQEventInterval=6.0 -SQRunTag=2026-11-21_085058_S3smoke_B0_N32_r0_prime -SQMode=B0",
+      "capture": "2026-11-21_085058_S3smoke_B0_N32_r0_prime.csv",
+      "stats": {
+        "FrameTime": {
+          "n": 1200,
+          "mean": 2.9729587499999997,
+          "min": 1.8017,
+          "median": 2.95355,
+          "p95": 3.456065,
+          "p99": 3.693618,
+          "max": 6.9181
+        },
+        "GameThreadTime": {
+          "n": 1200,
+          "mean": 1.9444919166666668,
+          "min": 1.3649,
+          "median": 1.8357999999999999,
+          "p95": 2.61869,
+          "p99": 2.833765,
+          "max": 5.3747
+        },
+        "RenderThreadTime": {
+          "n": 1200,
+          "mean": 2.9660748333333333,
+          "min": 2.3721,
+          "median": 2.9222,
+          "p95": 3.3853150000000003,
+          "p99": 3.583309,
+          "max": 4.3364
+        },
+        "GPUTime": {
+          "n": 1200,
+          "mean": 2.37682175,
+          "min": 2.0712,
+          "median": 2.3362999999999996,
+          "p95": 2.8435200000000003,
+          "p99": 2.927201,
+          "max": 2.992
+        },
+        "AI": {
+          "n": 1200,
+          "mean": 0.12062824999999999,
+          "min": 0.0002,
+          "median": 0.12869999999999998,
+          "p95": 0.298905,
+          "p99": 0.390314,
+          "max": 0.522
+        },
+        "Exclusive/GameThread/EnvQueryManager": {
+          "n": 1200,
+          "mean": 0.10845224999999999,
+          "min": 0.0002,
+          "median": 0.1149,
+          "p95": 0.2674199999999997,
+          "p99": 0.365707,
+          "max": 0.4693
+        },
+        "Exclusive/GameThread/SquadQueryDecide": {
+          "n": 1200,
+          "mean": 0.01151325,
+          "min": 0.0,
+          "median": 0.0119,
+          "p95": 0.0393,
+          "p99": 0.05567299999999993,
+          "max": 0.1253
+        },
+        "Exclusive/GameThread/Pathfinding": {
+          "n": 1200,
+          "mean": 0.00066275,
+          "min": 0.0,
+          "median": 0.0,
+          "p95": 0.0,
+          "p99": 0.015302999999999997,
+          "max": 0.0898
+        },
+        "SQBench/InCover": {
+          "n": 1200,
+          "mean": 18.350833333333334,
+          "min": 10.0,
+          "median": 19.0,
+          "p95": 22.0,
+          "p99": 23.0,
+          "max": 23.0
+        }
+      },
+      "finalised": true,
+      "events": {
+        "PSO": 2,
+        "SQBench/Threat": 4,
+        "SQBench/BenchEnd": 1
+      },
+      "frames": 1200,
+      "report_agents": "2026-11-21_085058_S3smoke_B0_N32_r0_prime_agents.csv",
+      "report_events": "2026-11-21_085058_S3smoke_B0_N32_r0_prime_events.csv",
+      "decisions": {
+        "captured_events": 4,
+        "agents": 32,
+        "conflict_onsets_per_min": 66.0,
+        "conflict_agent_frames": 38237,
+        "in_cover_share": 0.5735324729392173,
+        "switches_per_agent_per_event": 0.375,
+        "oscillations": 0.0,
+        "move_requests": 62.0,
+        "move_retries": 14.0,
+        "move_failures": 0.0,
+        "in_cover_by_next_event": 0.6796875,
+        "already_in_cover": 0.4296875,
+        "stuck_at_end": 9,
+        "queries_per_s": 64.1,
+        "queries_aborted": 0.0,
+        "claim_failures_per_min": 0.0,
+        "keep_checks": 159.0,
+        "item_tests_per_s": 5472.35,
+        "items_generated_per_s": 2702.1,
+        "query_latency_mean_s": 0.0,
+        "time_to_cover_median": 0.0,
+        "time_to_cover_p95": 3.395010000000002,
+        "time_to_cover_moved_median": 1.4583,
+        "time_to_cover_moved_p95": 5.1232999999999995,
+        "walk_ratio_median": 3.803618906942393,
+        "walk_ratio_p95": 9.755087863944588
+      },
+      "log_errors": 0,
+      "log_warnings": 0
+    },
+    {
+      "name": "2026-11-21_085058_S3smoke_B0_N32_r1",
+      "config": "B0",
+      "agents": 32,
+      "run": 1,
+      "priming": false,
+      "exit_code": 0,
+      "wall_seconds": 9.2,
+      "command": "\"D:\\UNREAL PORTFOLIO\\P07_SquadQuery\\Build\\Windows\\SquadQuery\\Binaries\\Win64\\SquadQuery.exe\" -windowed -ResX=1280 -ResY=720 -nosound -unattended -traceautostart=0 -deterministic -FPS=60 -novsync -SQExit -csvStartOnEvent=BenchStart -csvStopOnEvent=BenchEnd -SQAgents=32 -SQSeed=1 -SQWarmup=10.0 -SQCapture=20.0 -SQEventInterval=6.0 -SQRunTag=2026-11-21_085058_S3smoke_B0_N32_r1 -SQMode=B0",
+      "capture": "2026-11-21_085058_S3smoke_B0_N32_r1.csv",
+      "stats": {
+        "FrameTime": {
+          "n": 1200,
+          "mean": 3.0475219166666667,
+          "min": 1.9655,
+          "median": 3.02005,
+          "p95": 3.6042099999999997,
+          "p99": 3.8980699999999997,
+          "max": 7.4789
+        },
+        "GameThreadTime": {
+          "n": 1200,
+          "mean": 1.9740352499999998,
+          "min": 1.3296,
+          "median": 1.90305,
+          "p95": 2.5619949999999996,
+          "p99": 2.7591059999999996,
+          "max": 5.9266
+        },
+        "RenderThreadTime": {
+          "n": 1200,
+          "mean": 3.03966575,
+          "min": 2.3853,
+          "median": 2.9956,
+          "p95": 3.5233999999999996,
+          "p99": 3.822301,
+          "max": 4.7126
+        },
+        "GPUTime": {
+          "n": 1200,
+          "mean": 2.384040333333333,
+          "min": 2.0876,
+          "median": 2.3582,
+          "p95": 2.8105450000000003,
+          "p99": 2.9372089999999997,
+          "max": 3.5344
+        },
+        "AI": {
+          "n": 1200,
+          "mean": 0.12406991666666668,
+          "min": 0.0001,
+          "median": 0.1346,
+          "p95": 0.29212999999999995,
+          "p99": 0.37353499999999995,
+          "max": 0.6475
+        },
+        "Exclusive/GameThread/EnvQueryManager": {
+          "n": 1200,
+          "mean": 0.11185716666666666,
+          "min": 0.0001,
+          "median": 0.1208,
+          "p95": 0.26871,
+          "p99": 0.34190699999999996,
+          "max": 0.6162
+        },
+        "Exclusive/GameThread/SquadQueryDecide": {
+          "n": 1200,
+          "mean": 0.0116025,
+          "min": 0.0,
+          "median": 0.0121,
+          "p95": 0.033059999999999944,
+          "p99": 0.05180699999999999,
+          "max": 0.1619
+        },
+        "Exclusive/GameThread/Pathfinding": {
+          "n": 1200,
+          "mean": 0.00061025,
+          "min": 0.0,
+          "median": 0.0,
+          "p95": 0.0,
+          "p99": 0.015102999999999998,
+          "max": 0.026
+        },
+        "SQBench/InCover": {
+          "n": 1200,
+          "mean": 18.350833333333334,
+          "min": 10.0,
+          "median": 19.0,
+          "p95": 22.0,
+          "p99": 23.0,
+          "max": 23.0
+        }
+      },
+      "finalised": true,
+      "events": {
+        "PSO": 2,
+        "SQBench/Threat": 4,
+        "SQBench/BenchEnd": 1
+      },
+      "frames": 1200,
+      "report_agents": "2026-11-21_085058_S3smoke_B0_N32_r1_agents.csv",
+      "report_events": "2026-11-21_085058_S3smoke_B0_N32_r1_events.csv",
+      "decisions": {
+        "captured_events": 4,
+        "agents": 32,
+        "conflict_onsets_per_min": 66.0,
+        "conflict_agent_frames": 38237,
+        "in_cover_share": 0.5735324729392173,
+        "switches_per_agent_per_event": 0.375,
+        "oscillations": 0.0,
+        "move_requests": 62.0,
+        "move_retries": 14.0,
+        "move_failures": 0.0,
+        "in_cover_by_next_event": 0.6796875,
+        "already_in_cover": 0.4296875,
+        "stuck_at_end": 9,
+        "queries_per_s": 64.1,
+        "queries_aborted": 0.0,
+        "claim_failures_per_min": 0.0,
+        "keep_checks": 159.0,
+        "item_tests_per_s": 5472.35,
+        "items_generated_per_s": 2702.1,
+        "query_latency_mean_s": 0.0,
+        "time_to_cover_median": 0.0,
+        "time_to_cover_p95": 3.395010000000002,
+        "time_to_cover_moved_median": 1.4583,
+        "time_to_cover_moved_p95": 5.1232999999999995,
+        "walk_ratio_median": 3.803618906942393,
+        "walk_ratio_p95": 9.755087863944588
+      },
+      "log_errors": 0,
+      "log_warnings": 0
+    },
+    {
+      "name": "2026-11-21_085058_S3smoke_B1_N32_r1",
+      "config": "B1",
+      "agents": 32,
+      "run": 1,
+      "priming": false,
+      "exit_code": 0,
+      "wall_seconds": 9.1,
+      "command": "\"D:\\UNREAL PORTFOLIO\\P07_SquadQuery\\Build\\Windows\\SquadQuery\\Binaries\\Win64\\SquadQuery.exe\" -windowed -ResX=1280 -ResY=720 -nosound -unattended -traceautostart=0 -deterministic -FPS=60 -novsync -SQExit -csvStartOnEvent=BenchStart -csvStopOnEvent=BenchEnd -SQAgents=32 -SQSeed=1 -SQWarmup=10.0 -SQCapture=20.0 -SQEventInterval=6.0 -SQRunTag=2026-11-21_085058_S3smoke_B1_N32_r1 -SQMode=B1",
+      "capture": "2026-11-21_085058_S3smoke_B1_N32_r1.csv",
+      "stats": {
+        "FrameTime": {
+          "n": 1200,
+          "mean": 3.0146115,
+          "min": 1.7485,
+          "median": 2.97565,
+          "p95": 3.6093249999999997,
+          "p99": 4.231018,
+          "max": 8.0322
+        },
+        "GameThreadTime": {
+          "n": 1200,
+          "mean": 1.7470410833333334,
+          "min": 1.1204,
+          "median": 1.67775,
+          "p95": 2.336325,
+          "p99": 2.572097,
+          "max": 5.8164
+        },
+        "RenderThreadTime": {
+          "n": 1200,
+          "mean": 3.0066739166666667,
+          "min": 2.2646,
+          "median": 2.94705,
+          "p95": 3.5370749999999997,
+          "p99": 4.136013999999999,
+          "max": 5.1985
+        },
+        "GPUTime": {
+          "n": 1200,
+          "mean": 2.3532743333333332,
+          "min": 2.0354,
+          "median": 2.2903000000000002,
+          "p95": 2.848105,
+          "p99": 2.993551,
+          "max": 3.2534
+        },
+        "AI": {
+          "n": 1200,
+          "mean": 0.12076816666666666,
+          "min": 0.0002,
+          "median": 0.12675,
+          "p95": 0.286105,
+          "p99": 0.41582899999999995,
+          "max": 0.6547000000000001
+        },
+        "Exclusive/GameThread/EnvQueryManager": {
+          "n": 1200,
+          "mean": 0.10587658333333333,
+          "min": 0.0002,
+          "median": 0.11055000000000001,
+          "p95": 0.25541,
+          "p99": 0.345708,
+          "max": 0.489
+        },
+        "Exclusive/GameThread/SquadQueryDecide": {
+          "n": 1200,
+          "mean": 0.014403333333333332,
+          "min": 0.0,
+          "median": 0.0145,
+          "p95": 0.041029999999999976,
+          "p99": 0.08113199999999998,
+          "max": 0.351
+        },
+        "Exclusive/GameThread/Pathfinding": {
+          "n": 1200,
+          "mean": 0.00048824999999999997,
+          "min": 0.0,
+          "median": 0.0,
+          "p95": 0.0,
+          "p99": 0.015600999999999999,
+          "max": 0.0666
+        },
+        "SQBench/InCover": {
+          "n": 1200,
+          "mean": 28.415,
+          "min": 19.0,
+          "median": 31.0,
+          "p95": 32.0,
+          "p99": 32.0,
+          "max": 32.0
+        }
+      },
+      "finalised": true,
+      "events": {
+        "PSO": 2,
+        "SQBench/Threat": 4,
+        "SQBench/BenchEnd": 1
+      },
+      "frames": 1200,
+      "report_agents": "2026-11-21_085058_S3smoke_B1_N32_r1_agents.csv",
+      "report_events": "2026-11-21_085058_S3smoke_B1_N32_r1_events.csv",
+      "decisions": {
+        "captured_events": 4,
+        "agents": 32,
+        "conflict_onsets_per_min": 0.0,
+        "conflict_agent_frames": 0,
+        "in_cover_share": 0.8880360116569526,
+        "switches_per_agent_per_event": 0.328125,
+        "oscillations": 0.0,
+        "move_requests": 42.0,
+        "move_retries": 0.0,
+        "move_failures": 0.0,
+        "in_cover_by_next_event": 0.9765625,
+        "already_in_cover": 0.6640625,
+        "stuck_at_end": 3,
+        "queries_per_s": 64.1,
+        "queries_aborted": 0.0,
+        "claim_failures_per_min": 0.0,
+        "keep_checks": 1282.0,
+        "item_tests_per_s": 4431.9,
+        "items_generated_per_s": 2081.95,
+        "query_latency_mean_s": 0.0,
+        "time_to_cover_median": 0.0,
+        "time_to_cover_p95": 2.25,
+        "time_to_cover_moved_median": 1.2083499999999998,
+        "time_to_cover_moved_p95": 2.7341349999999998,
+        "walk_ratio_median": 1.4572995451054762,
+        "walk_ratio_p95": 2.3920195219381584
+      },
+      "log_errors": 0,
+      "log_warnings": 0
+    },
+    {
+      "name": "2026-11-21_085058_S3smoke_B2_N32_r1",
+      "config": "B2",
+      "agents": 32,
+      "run": 1,
+      "priming": false,
+      "exit_code": 0,
+      "wall_seconds": 8.1,
+      "command": "\"D:\\UNREAL PORTFOLIO\\P07_SquadQuery\\Build\\Windows\\SquadQuery\\Binaries\\Win64\\SquadQuery.exe\" -windowed -ResX=1280 -ResY=720 -nosound -unattended -traceautostart=0 -deterministic -FPS=60 -novsync -SQExit -csvStartOnEvent=BenchStart -csvStopOnEvent=BenchEnd -SQAgents=32 -SQSeed=1 -SQWarmup=10.0 -SQCapture=20.0 -SQEventInterval=6.0 -SQRunTag=2026-11-21_085058_S3smoke_B2_N32_r1 -SQMode=B2",
+      "capture": "2026-11-21_085058_S3smoke_B2_N32_r1.csv",
+      "stats": {
+        "FrameTime": {
+          "n": 1200,
+          "mean": 2.9521325833333334,
+          "min": 1.8615,
+          "median": 2.91255,
+          "p95": 3.541835,
+          "p99": 4.298503,
+          "max": 7.2365
+        },
+        "GameThreadTime": {
+          "n": 1200,
+          "mean": 1.672912,
+          "min": 1.1187,
+          "median": 1.56365,
+          "p95": 2.26717,
+          "p99": 2.665828999999999,
+          "max": 6.9424
+        },
+        "RenderThreadTime": {
+          "n": 1200,
+          "mean": 2.9423638333333333,
+          "min": 2.1636,
+          "median": 2.8848000000000003,
+          "p95": 3.4761299999999995,
+          "p99": 3.9510699999999996,
+          "max": 4.9348
+        },
+        "GPUTime": {
+          "n": 1200,
+          "mean": 2.3679018333333333,
+          "min": 2.0442,
+          "median": 2.31165,
+          "p95": 2.8417149999999998,
+          "p99": 2.9969219999999996,
+          "max": 3.4731
+        },
+        "AI": {
+          "n": 1200,
+          "mean": 0.009714416666666666,
+          "min": 0.0001,
+          "median": 0.0003,
+          "p95": 0.0006,
+          "p99": 0.024823999999999978,
+          "max": 4.6328
+        },
+        "Exclusive/GameThread/EnvQueryManager": {
+          "n": 1200,
+          "mean": 0.008309666666666667,
+          "min": 0.0001,
+          "median": 0.0003,
+          "p95": 0.0006,
+          "p99": 0.0015019999999999981,
+          "max": 4.148
+        },
+        "Exclusive/GameThread/SquadQueryDecide": {
+          "n": 1200,
+          "mean": 0.0010565833333333334,
+          "min": 0.0,
+          "median": 0.0,
+          "p95": 0.0,
+          "p99": 0.0,
+          "max": 0.4306
+        },
+        "Exclusive/GameThread/Pathfinding": {
+          "n": 1200,
+          "mean": 0.00034816666666666665,
+          "min": 0.0,
+          "median": 0.0,
+          "p95": 0.0,
+          "p99": 0.0,
+          "max": 0.0912
+        },
+        "SQBench/InCover": {
+          "n": 1200,
+          "mean": 27.535,
+          "min": 18.0,
+          "median": 29.0,
+          "p95": 31.0,
+          "p99": 31.0,
+          "max": 31.0
+        }
+      },
+      "finalised": true,
+      "events": {
+        "PSO": 2,
+        "SQBench/Threat": 4,
+        "SQBench/BenchEnd": 1
+      },
+      "frames": 1200,
+      "report_agents": "2026-11-21_085058_S3smoke_B2_N32_r1_agents.csv",
+      "report_events": "2026-11-21_085058_S3smoke_B2_N32_r1_events.csv",
+      "decisions": {
+        "captured_events": 4,
+        "agents": 32,
+        "conflict_onsets_per_min": 0.0,
+        "conflict_agent_frames": 0,
+        "in_cover_share": 0.860558909242298,
+        "switches_per_agent_per_event": 0.3203125,
+        "oscillations": 0.0,
+        "move_requests": 45.0,
+        "move_retries": 4.0,
+        "move_failures": 0.0,
+        "in_cover_by_next_event": 0.9453125,
+        "already_in_cover": 0.6484375,
+        "stuck_at_end": 4,
+        "queries_per_s": 7.0,
+        "queries_aborted": 0.0,
+        "claim_failures_per_min": 36.0,
+        "keep_checks": 140.0,
+        "item_tests_per_s": 481.05,
+        "items_generated_per_s": 230.45,
+        "query_latency_mean_s": 0.0,
+        "time_to_cover_median": 0.0,
+        "time_to_cover_p95": 2.1833,
+        "time_to_cover_moved_median": 1.30835,
+        "time_to_cover_moved_p95": 2.900004999999999,
+        "walk_ratio_median": 1.1156387065032405,
+        "walk_ratio_p95": 4.172099404056022
+      },
+      "log_errors": 0,
+      "log_warnings": 0
+    }
+  ]
+}

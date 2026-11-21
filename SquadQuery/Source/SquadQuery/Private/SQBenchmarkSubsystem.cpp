@@ -8,6 +8,7 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/World.h"
+#include "EnvironmentQuery/EnvQueryTypes.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/PlatformMisc.h"
 #include "Math/RandomStream.h"
@@ -20,6 +21,10 @@
 #include "ProfilingDebugging/CsvProfiler.h"
 #include "SQAgent.h"
 #include "SQArenaSubsystem.h"
+#include "SQQueries.h"
+#include "Squad.h"
+#include "SquadMemberComponent.h"
+#include "SquadQuerySubsystem.h"
 #include "Stats/Stats.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogSQBench, Log, All);
@@ -29,6 +34,19 @@ CSV_DEFINE_CATEGORY(SQBench, true);
 
 namespace SQBench
 {
+	// The configuration names of 01 section 6.2.
+	struct FModeName
+	{
+		const TCHAR* Name;
+		ESQBrainMode Mode;
+	};
+	constexpr FModeName Modes[] = {
+		{ TEXT("Scripted"), ESQBrainMode::Scripted },
+		{ TEXT("B0"), ESQBrainMode::PolledEQS },
+		{ TEXT("B1"), ESQBrainMode::PolledClaims },
+		{ TEXT("B2"), ESQBrainMode::EventClaims },
+	};
+
 	constexpr float SquadRingRadiusCm = 250.f;         // members start on a ring around their squad centre
 	constexpr float SquadSpacingCm = 1400.f;           // squad centres at least this far apart
 	constexpr float SpawnRangeCm = 5000.f;             // squad centres inside +/- 50 m
@@ -57,11 +75,29 @@ USQBenchmarkSubsystem::FRunSettings USQBenchmarkSubsystem::ReadRunSettings()
 	return Read;
 }
 
-bool USQBenchmarkSubsystem::ValidateRunSettings() const
+bool USQBenchmarkSubsystem::ParseMode(const FString& Mode, ESQBrainMode& OutMode)
 {
-	if (Settings.Mode != TEXT("Scripted"))
+	for (const SQBench::FModeName& Entry : SQBench::Modes)
 	{
-		UE_LOG(LogSQBench, Error, TEXT("Unknown -SQMode=%s (this build supports: Scripted)."), *Settings.Mode);
+		if (Mode == Entry.Name)
+		{
+			OutMode = Entry.Mode;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool USQBenchmarkSubsystem::ValidateRunSettings()
+{
+	if (!ParseMode(Settings.Mode, BrainMode))
+	{
+		FString Known;
+		for (const SQBench::FModeName& Entry : SQBench::Modes)
+		{
+			Known += (Known.IsEmpty() ? TEXT("") : TEXT(", ")) + FString(Entry.Name);
+		}
+		UE_LOG(LogSQBench, Error, TEXT("Unknown -SQMode=%s (this build supports: %s)."), *Settings.Mode, *Known);
 		return false;
 	}
 	// At most one event fires per frame, and agents need time to move between events: 1 s is a floor, not a target.
@@ -116,6 +152,10 @@ void USQBenchmarkSubsystem::HandleArenaReady()
 
 void USQBenchmarkSubsystem::StartRun(UWorld& World)
 {
+	if (BrainMode != ESQBrainMode::Scripted)
+	{
+		AgentQuery = SQQueries::MakeAgentCoverQuery(*this);
+	}
 	SpawnSquads(World);
 	AgentMetrics.SetNum(Agents.Num());
 	SlotTargetCounts.SetNumZeroed(Arena->GetSlots().Num());
@@ -214,8 +254,11 @@ void USQBenchmarkSubsystem::SpawnSquads(UWorld& World)
 				UE_LOG(LogSQBench, Error, TEXT("Spawning agent %d failed; the run is incomplete."), Agents.Num());
 				continue;
 			}
-			Agent->GetBrain()->Setup(SquadIndex);
+			Agent->GetSquadMember()->SetSquadId(SquadIndex);   // before BeginPlay, which registers it with its squad
 			Agent->FinishSpawning(SpawnTransform);
+			// After FinishSpawning: the seeded poll phase needs a registered tick function.
+			const uint32 PollSeed = HashCombineFast(GetTypeHash(Arena->GetSeed()), GetTypeHash(Agents.Num()));   // per agent, from the seed
+			Agent->GetBrain()->ConfigureMode(BrainMode, AgentQuery, static_cast<int32>(PollSeed));
 			Agents.Add(Agent);
 			Crc = FCrc::TypeCrc32(Point, Crc);
 		}
@@ -245,7 +288,7 @@ void USQBenchmarkSubsystem::Tick(float DeltaTime)
 		{
 			if (Agents[Index])
 			{
-				AgentMetrics[Index].AtStart = Agents[Index]->GetBrain()->GetCounters();
+				Agents[Index]->GetBrain()->ResetCounters();   // from here the counters are the capture's
 			}
 		}
 		// A conflict already running when the capture starts is a capture conflict too: forget the warm-up's state so
@@ -314,7 +357,26 @@ void USQBenchmarkSubsystem::FireThreatEvent(double Now)
 		AgentMetrics[Index].PositionAtEvent = Agents[Index] ? Agents[Index]->GetActorLocation() : FVector::ZeroVector;
 	}
 
-	if (Settings.Mode == TEXT("Scripted"))
+	// Every configuration learns of the threat the same way: each squad is told (01 section 6.2). B0 and B1 notice at
+	// their next poll; B2 queries now; SQ (S5) queues a squad evaluation.
+	if (USquadQuerySubsystem* Squads = GetWorld()->GetSubsystem<USquadQuerySubsystem>())
+	{
+		for (const TPair<int32, TObjectPtr<USquad>>& Entry : Squads->GetSquads())
+		{
+			Squads->SetThreat(Entry.Key, ThreatLocation);
+		}
+	}
+	if (BrainMode == ESQBrainMode::EventClaims)
+	{
+		for (ASQAgent* Agent : Agents)
+		{
+			if (Agent)
+			{
+				Agent->GetBrain()->OnThreatEvent();
+			}
+		}
+	}
+	else if (BrainMode == ESQBrainMode::Scripted)
 	{
 		AssignScripted();
 	}
@@ -462,30 +524,38 @@ void USQBenchmarkSubsystem::UpdateMetrics(double Now)
 void USQBenchmarkSubsystem::WriteRunReport() const
 {
 	const int64 AgentFrames = int64(CapturedFrames) * Agents.Num();
+	// Item counts in the report come from EQS debug data: compiled in (USE_EQS_DEBUGGER) and switched on at run time.
+#if USE_EQS_DEBUGGER
+	const int32 EqsDebugData = FEnvQueryInstance::bDebuggingInfoEnabled ? 1 : 0;
+#else
+	const int32 EqsDebugData = 0;
+#endif
 	const FString Header = FString::Printf(
-		TEXT("# run=%s mode=%s agents=%d seed=%d arenahash=0x%08X warmup=%.3f capture=%.3f interval=%.3f walkspeed=%.1f benchstart=%.6f captured_events=%d frames=%d agent_frames=%lld in_cover_agent_frames=%lld conflict_onsets=%d conflict_agent_frames=%lld\n"),
+		TEXT("# run=%s mode=%s agents=%d seed=%d arenahash=0x%08X warmup=%.3f capture=%.3f interval=%.3f walkspeed=%.1f eqsdebug=%d benchstart=%.6f captured_events=%d frames=%d agent_frames=%lld in_cover_agent_frames=%lld conflict_onsets=%d conflict_agent_frames=%lld\n"),
 		*Settings.RunTag, *Settings.Mode, Agents.Num(), Arena->GetSeed(), Arena->GetArenaHash(), Settings.WarmupSeconds,
-		Settings.CaptureSeconds, Settings.EventIntervalSeconds, ASQAgent::WalkSpeedCmPerSecond, BenchStartTime, CapturedEvents,
+		Settings.CaptureSeconds, Settings.EventIntervalSeconds, ASQAgent::WalkSpeedCmPerSecond, EqsDebugData, BenchStartTime, CapturedEvents,
 		CapturedFrames, AgentFrames, InCoverAgentFrames, ConflictOnsets, ConflictAgentFrames);
 
-	FString AgentsReport = Header + TEXT("agent,squad,switches,oscillations,move_requests,move_retries,move_failures,target_slot,final_x,final_y,final_slot_distance_cm\n");
+	FString AgentsReport = Header + TEXT("agent,squad,switches,oscillations,move_requests,move_retries,move_failures,queries_started,queries_finished,queries_aborted,items_generated,item_tests,keep_checks,claim_failures,query_latency_s,target_slot,final_x,final_y,final_slot_distance_cm\n");
 	for (int32 Index = 0; Index < Agents.Num(); ++Index)
 	{
 		const ASQAgent* Agent = Agents[Index];
 		if (Agent == nullptr)
 		{
-			AgentsReport += FString::Printf(TEXT("%d,,,,,,,,,,\n"), Index);
+			AgentsReport += FString::Printf(TEXT("%d,,,,,,,,,,,,,,,,,,\n"), Index);
 			continue;
 		}
 		const USQAgentBrainComponent* Brain = Agent->GetBrain();
-		const FSQBrainCounters Captured = Brain->GetCounters() - AgentMetrics[Index].AtStart;
+		const FSQBrainCounters& Captured = Brain->GetCounters();
 		const FVector Location = Agent->GetActorLocation();
 		const int32 Slot = Brain->GetTargetSlot();
 		// How far the agent ended from its slot (-1: no slot). Above InCoverRadiusCm it never got there: a stuck agent.
 		const double SlotDistance = Arena->GetSlots().IsValidIndex(Slot) ? FVector::Dist2D(Location, Arena->GetSlots()[Slot].Location) : -1.0;
-		AgentsReport += FString::Printf(TEXT("%d,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f\n"), Index, Brain->GetSquadIndex(),
-			Captured.Switches, Captured.Oscillations, Captured.MoveRequests, Captured.MoveRetries, Captured.MoveFailures,
-			Slot, Location.X, Location.Y, SlotDistance);
+		AgentsReport += FString::Printf(TEXT("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%lld,%lld,%d,%d,%.6f,%d,%.1f,%.1f,%.1f\n"), Index,
+			Agent->GetSquadMember()->GetSquadId(), Captured.Switches, Captured.Oscillations, Captured.MoveRequests, Captured.MoveRetries,
+			Captured.MoveFailures, Captured.QueriesStarted, Captured.QueriesFinished, Captured.QueriesAborted, Captured.ItemsGenerated,
+			Captured.ItemTests, Captured.KeepChecks, Captured.ClaimFailures, Captured.QueryLatencySeconds, Slot, Location.X, Location.Y,
+			SlotDistance);
 	}
 
 	FString EventsReport = Header + TEXT("event,threat,time,agent,seconds_to_cover,distance_cm\n");
